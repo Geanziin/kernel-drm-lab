@@ -28,6 +28,8 @@
 struct nouveau_hwmon {
 	struct drm_device *dev;
 	struct device *hwmon;
+	bool gsp_temp;
+	u32 gsp_temp_sensor;
 };
 
 static inline struct nouveau_hwmon *

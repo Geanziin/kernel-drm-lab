@@ -161,6 +161,10 @@ nouveau_exec_job_run(struct nouveau_job *job)
 	 */
 	exec_job->fence = NULL;
 
+	if (chan->busy_engine > NOUVEAU_BUSY_NONE && chan->busy_engine < NOUVEAU_BUSY_NR)
+		nouveau_engine_busy_track(&chan->cli->drm->video_busy[chan->busy_engine],
+					  &fence->base);
+
 	return &fence->base;
 }
 

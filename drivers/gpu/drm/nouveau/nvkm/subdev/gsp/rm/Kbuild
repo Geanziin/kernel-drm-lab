@@ -17,3 +17,4 @@ nvkm-y += nvkm/subdev/gsp/rm/gb20x.o
 
 include $(src)/nvkm/subdev/gsp/rm/r535/Kbuild
 include $(src)/nvkm/subdev/gsp/rm/r570/Kbuild
+include $(src)/nvkm/subdev/gsp/rm/r615/Kbuild

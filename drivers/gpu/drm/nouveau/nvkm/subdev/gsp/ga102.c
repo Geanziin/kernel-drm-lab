@@ -21,6 +21,8 @@
  */
 #include "priv.h"
 
+#include <rm/rm.h>
+
 #include <nvfw/flcn.h>
 #include <nvfw/fw.h>
 #include <nvfw/hs.h>
@@ -171,23 +173,103 @@ ga102_gsp_r535 = {
 };
 
 static const struct nvkm_gsp_func
+ga102_gsp_r615 = {
+	.flcn = &ga102_gsp_flcn,
+	.fwsec = &ga102_gsp_fwsec,
+
+	.sig_section = ".fwsignature_ga10x",
+
+	.booter.ctor = ga102_gsp_booter_ctor,
+
+	.fwsec_sb.ctor = tu102_gsp_fwsec_sb_ctor,
+	.fwsec_sb.dtor = tu102_gsp_fwsec_sb_dtor,
+
+	.dtor = r615_gsp_dtor,
+	.oneinit = r615_gsp_oneinit,
+	.init = r615_gsp_init,
+	.fini = r615_gsp_fini,
+	.reset = ga102_gsp_reset,
+
+	.rm.gpu = &ga1xx_gpu,
+};
+
+static const struct nvkm_gsp_func
 ga102_gsp = {
 	.flcn = &ga102_gsp_flcn,
 };
 
 static struct nvkm_gsp_fwif
 ga102_gsps[] = {
+	/* 615 requires its native lifecycle and framed MSGQ/GMCAPI transport.
+	 * Single 615 entry: the 570-path hybrid (candidate 10) was removed so a
+	 * version pin can only ever select the native backend.
+	 */
+	{  2, r615_gsp_load, &ga102_gsp_r615, &r615_rm_ga102, "615.78.08" },
 	{  1, tu102_gsp_load, &ga102_gsp_r535, &r570_rm_ga102, "570.144" },
 	{  0, tu102_gsp_load, &ga102_gsp_r535, &r535_rm_ga102, "535.113.01" },
 	{ -1, gv100_gsp_nofw, &ga102_gsp },
 	{}
 };
 
+#ifdef NOUVEAU_LAB_PIN_GSP_615
+static char *gsp_fw_ver = "615.78.08";
+#else
+static char *gsp_fw_ver;
+#endif
+module_param(gsp_fw_ver, charp, 0444);
+MODULE_PARM_DESC(gsp_fw_ver,
+		 "GSP firmware version to try first, e.g. 615.78.08, 570.144; "
+		 "experimental 615 requires an explicit pin");
+
+/*
+ * Build the probe order: the requested version first, everything else in its
+ * default order. Lets a boot test pin one version from the kernel command line
+ * without rebuilding, while keeping the rest of the table as fallbacks.
+ */
+static int
+ga102_gsp_fwif_order(struct nvkm_gsp_fwif *selection, unsigned capacity,
+		     const struct nvkm_gsp_fwif *defaults)
+{
+	unsigned count = 0;
+	bool pinned = false;
+
+	if (capacity < ARRAY_SIZE(ga102_gsps))
+		return -ENOSPC;
+	if (gsp_fw_ver && gsp_fw_ver[0]) {
+		for (unsigned i = 0; defaults[i].load; i++) {
+			if (!defaults[i].ver || strcmp(defaults[i].ver, gsp_fw_ver))
+				continue;
+			selection[count++] = defaults[i];
+			pinned = true;
+			break;
+		}
+		if (!pinned)
+			return -EINVAL;
+	}
+	/* The no-firmware entry has ver == NULL but still has a load callback. */
+	for (unsigned i = 0; defaults[i].load && count < capacity - 1; i++) {
+		/* Experimental 615 is opt-in, never an implicit promotion or fallback. */
+		if (defaults[i].ver && !strcmp(defaults[i].ver, "615.78.08"))
+			continue;
+		if (pinned && defaults[i].ver && !strcmp(defaults[i].ver, gsp_fw_ver))
+			continue;
+		selection[count++] = defaults[i];
+	}
+	selection[count] = (struct nvkm_gsp_fwif){};
+	return 0;
+}
+
 int
 ga102_gsp_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
 	      struct nvkm_gsp **pgsp)
 {
-	return nvkm_gsp_new_(ga102_gsps, device, type, inst, pgsp);
+	struct nvkm_gsp_fwif selection[ARRAY_SIZE(ga102_gsps)];
+	int ret;
+
+	ret = ga102_gsp_fwif_order(selection, ARRAY_SIZE(selection), ga102_gsps);
+	if (ret)
+		return ret;
+	return nvkm_gsp_new_(selection, device, type, inst, pgsp);
 }
 
 NVKM_GSP_FIRMWARE_BOOTER(ga102, 535.113.01);
@@ -201,3 +283,9 @@ NVKM_GSP_FIRMWARE_BOOTER(ga103, 570.144);
 NVKM_GSP_FIRMWARE_BOOTER(ga104, 570.144);
 NVKM_GSP_FIRMWARE_BOOTER(ga106, 570.144);
 NVKM_GSP_FIRMWARE_BOOTER(ga107, 570.144);
+
+NVKM_GSP_FIRMWARE_BOOTER(ga102, 615.78.08);
+NVKM_GSP_FIRMWARE_BOOTER(ga103, 615.78.08);
+NVKM_GSP_FIRMWARE_BOOTER(ga104, 615.78.08);
+NVKM_GSP_FIRMWARE_BOOTER(ga106, 615.78.08);
+NVKM_GSP_FIRMWARE_BOOTER(ga107, 615.78.08);

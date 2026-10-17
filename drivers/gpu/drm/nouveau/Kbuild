@@ -4,6 +4,7 @@ ccflags-y += -I $(src)/include/nvkm
 ccflags-y += -I $(src)/nvkm
 ccflags-y += -I $(src)/nvkm/subdev/gsp
 ccflags-y += -I $(src)
+ccflags-$(NOUVEAU_LAB_PIN_GSP) += -DNOUVEAU_LAB_PIN_GSP_615
 
 # NVKM - HW resource manager
 #- code also used by various userspace tools/tests
@@ -22,6 +23,8 @@ endif
 nouveau-$(CONFIG_DEBUG_FS) += nouveau_debugfs.o
 nouveau-y += nouveau_drm.o
 nouveau-y += nouveau_hwmon.o
+nouveau-y += nouveau_gsp_telemetry.o
+nouveau-y += nouveau_engine_busy.o
 nouveau-$(CONFIG_COMPAT) += nouveau_ioc32.o
 nouveau-$(CONFIG_LEDS_CLASS) += nouveau_led.o
 nouveau-y += nouveau_nvif.o

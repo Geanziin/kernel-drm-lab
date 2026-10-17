@@ -408,6 +408,12 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 			case NOUVEAU_FIFO_ENGINE_CE:
 				engine = NV_DEVICE_HOST_RUNLIST_ENGINES_CE;
 				break;
+			case NOUVEAU_FIFO_ENGINE_NVDEC:
+				engine = NV_DEVICE_HOST_RUNLIST_ENGINES_NVDEC;
+				break;
+			case NOUVEAU_FIFO_ENGINE_NVENC:
+				engine = NV_DEVICE_HOST_RUNLIST_ENGINES_NVENC;
+				break;
 			default:
 				return nouveau_abi16_put(abi16, -ENOSYS);
 			}
@@ -438,6 +444,11 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 				  init->tt_ctxdma_handle, &chan->chan);
 	if (ret)
 		goto done;
+
+	if (engine == NV_DEVICE_HOST_RUNLIST_ENGINES_NVDEC)
+		chan->chan->busy_engine = NOUVEAU_BUSY_NVDEC;
+	else if (engine == NV_DEVICE_HOST_RUNLIST_ENGINES_NVENC)
+		chan->chan->busy_engine = NOUVEAU_BUSY_NVENC;
 
 	/* If we're not using the VM_BIND uAPI, we don't need a scheduler.
 	 *
@@ -479,12 +490,16 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 	 */
 	switch (device->info.family) {
 	case NV_DEVICE_INFO_V0_VOLTA:
+		if (engine == NV_DEVICE_HOST_RUNLIST_ENGINES_NVDEC)
+			break;
 		ret = nvif_object_ctor(&chan->chan->user, "abi16CeWar", 0, VOLTA_DMA_COPY_A,
 				       NULL, 0, &chan->ce);
 		if (ret)
 			goto done;
 		break;
 	case NV_DEVICE_INFO_V0_TURING:
+		if (engine == NV_DEVICE_HOST_RUNLIST_ENGINES_NVDEC)
+			break;
 		ret = nvif_object_ctor(&chan->chan->user, "abi16CeWar", 0, TURING_DMA_COPY_A,
 				       NULL, 0, &chan->ce);
 		if (ret)

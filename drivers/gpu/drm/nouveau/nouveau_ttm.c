@@ -24,6 +24,7 @@
  */
 
 #include <linux/limits.h>
+#include <linux/sysfs.h>
 
 #include <drm/ttm/ttm_range_manager.h>
 #include <drm/drm_cache.h>
@@ -34,6 +35,58 @@
 #include "nouveau_ttm.h"
 
 #include <core/tegra.h>
+
+static ssize_t
+mem_info_vram_total_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%llu\n", drm->client.device.info.ram_size);
+}
+static DEVICE_ATTR_RO(mem_info_vram_total);
+
+static ssize_t
+mem_info_vram_usable_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%llu\n", drm->gem.vram_available);
+}
+static DEVICE_ATTR_RO(mem_info_vram_usable);
+
+static ssize_t
+mem_info_vram_used_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+	struct ttm_resource_manager *man;
+
+	man = ttm_manager_type(&drm->ttm.bdev, TTM_PL_VRAM);
+	if (!man || !ttm_resource_manager_used(man))
+		return -ENODEV;
+	/* TTM allocations only; firmware and non-TTM reservations are not included. */
+	return sysfs_emit(buf, "%llu\n", ttm_resource_manager_usage(man));
+}
+static DEVICE_ATTR_RO(mem_info_vram_used);
+
+static struct attribute *nouveau_meminfo_attrs[] = {
+	&dev_attr_mem_info_vram_total.attr,
+	&dev_attr_mem_info_vram_usable.attr,
+	&dev_attr_mem_info_vram_used.attr,
+	NULL,
+};
+
+static umode_t
+nouveau_meminfo_visible(struct kobject *kobj, struct attribute *attr, int index)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(kobj_to_dev(kobj));
+
+	return drm->client.device.info.ram_size ? attr->mode : 0;
+}
+
+static const struct attribute_group nouveau_meminfo_group = {
+	.attrs = nouveau_meminfo_attrs,
+	.is_visible = nouveau_meminfo_visible,
+};
 
 static void
 nouveau_manager_del(struct ttm_resource_manager *man,
@@ -344,6 +397,11 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 
 	NV_INFO(drm, "VRAM: %d MiB\n", (u32)(drm->gem.vram_available >> 20));
 	NV_INFO(drm, "GART: %d MiB\n", (u32)(drm->gem.gart_available >> 20));
+	ret = sysfs_create_group(&drm->dev->dev->kobj, &nouveau_meminfo_group);
+	if (ret)
+		NV_WARN(drm, "Unable to register VRAM accounting: %d\n", ret);
+	else
+		drm->ttm.meminfo_registered = true;
 	return 0;
 }
 
@@ -351,6 +409,11 @@ void
 nouveau_ttm_fini(struct nouveau_drm *drm)
 {
 	struct nvkm_device *device = nvxx_device(drm);
+
+	if (drm->ttm.meminfo_registered) {
+		sysfs_remove_group(&drm->dev->dev->kobj, &nouveau_meminfo_group);
+		drm->ttm.meminfo_registered = false;
+	}
 
 	nouveau_ttm_fini_vram(drm);
 	nouveau_ttm_fini_gtt(drm);

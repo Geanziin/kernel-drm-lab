@@ -102,6 +102,11 @@ nvkm_gsp_dtor(struct nvkm_subdev *subdev)
 
 	if (gsp->func && gsp->func->dtor)
 		gsp->func->dtor(gsp);
+	/* The native boot owner retains the complete immutable owner on a
+	 * failed hardware stop, not just allocations referring to freed state.
+	 */
+	if (gsp->r615_quarantined)
+		return NULL;
 
 	nvkm_falcon_dtor(&gsp->falcon);
 	kfree(gsp->rm);
@@ -153,6 +158,7 @@ nvkm_gsp_new_(const struct nvkm_gsp_fwif *fwif, struct nvkm_device *device,
 			return -ENOMEM;
 
 		gsp->rm->device = device;
+		gsp->rm->version = fwif->ver;
 		gsp->rm->gpu = fwif->func->rm.gpu;
 		gsp->rm->wpr = fwif->rm->wpr;
 		gsp->rm->api = fwif->rm->api;

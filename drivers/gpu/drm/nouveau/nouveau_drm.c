@@ -60,6 +60,7 @@
 #include "nouveau_vga.h"
 #include "nouveau_led.h"
 #include "nouveau_hwmon.h"
+#include "nouveau_gsp_telemetry.h"
 #include "nouveau_acpi.h"
 #include "nouveau_bios.h"
 #include "nouveau_ioctl.h"
@@ -591,6 +592,7 @@ nouveau_drm_device_fini(struct nouveau_drm *drm)
 	nouveau_led_fini(dev);
 	nouveau_dmem_fini(drm);
 	nouveau_svm_fini(drm);
+	nouveau_gsp_telemetry_fini(dev);
 	nouveau_hwmon_fini(dev);
 	nouveau_debugfs_fini(drm);
 
@@ -645,6 +647,8 @@ nouveau_drm_device_init(struct nouveau_drm *drm)
 	INIT_LIST_HEAD(&drm->clients);
 	mutex_init(&drm->clients_lock);
 	spin_lock_init(&drm->tile.lock);
+	for (int i = 0; i < NOUVEAU_BUSY_NR; i++)
+		nouveau_engine_busy_init(&drm->video_busy[i]);
 
 	/* workaround an odd issue on nvc1 by disabling the device's
 	 * nosnoop capability.  hopefully won't cause issues until a
@@ -677,6 +681,8 @@ nouveau_drm_device_init(struct nouveau_drm *drm)
 
 	nouveau_debugfs_init(drm);
 	nouveau_hwmon_init(dev);
+	if (nouveau_gsp_telemetry_init(dev))
+		NV_WARN(drm, "GSP telemetry exposure failed\n");
 	nouveau_svm_init(drm);
 	nouveau_dmem_init(drm);
 	nouveau_led_init(dev);

@@ -31,6 +31,16 @@ void nvkm_gsp_sg_free(struct nvkm_device *, struct sg_table *);
 
 typedef int (*nvkm_gsp_msg_ntfy_func)(void *priv, u32 fn, void *repv, u32 repc);
 
+struct r615_boot_payload;
+struct r615_rpc;
+struct r615_runtime;
+struct r615_host;
+struct r615_pm;
+struct r615_health;
+struct r615_telemetry;
+struct r615_static;
+struct r615_msgq;
+
 struct nvkm_gsp_event;
 typedef void (*nvkm_gsp_event_func)(struct nvkm_gsp_event *, void *repv, u32 repc);
 
@@ -248,6 +258,28 @@ struct nvkm_gsp {
 
 	u32 rpc_seq;
 
+	struct r615_boot_payload *r615_payload;
+	struct r615_rpc *r615_rpc;
+	struct r615_runtime *r615_runtime;
+	struct r615_host *r615_host;
+	struct r615_pm *r615_pm;
+	struct r615_health *r615_health;
+	struct r615_telemetry *r615_telemetry;
+	bool r615_recovery_required;
+	u64 *r615_sysinfo;
+	u32 r615_sysinfo_count;
+	u64 *r615_static_words;
+	u32 r615_static_count;
+	struct r615_static *r615_static;
+	bool r615_stopped; /* set only after the boot owner successfully stops hardware */
+	bool r615_locks_ready;
+	bool r615_fwsec_ready;
+	bool r615_quarantined;
+	struct list_head r615_quarantine_entry;
+	bool r615_suspend_sent;
+	bool r615_suspended;
+	u8 r615_teardown_stage;
+
 #ifdef CONFIG_DEBUG_FS
 	/*
 	 * Logging buffers in debugfs. The wrapper objects need to remain
@@ -339,8 +371,13 @@ nvkm_gsp_rm_ctrl_rd(struct nvkm_gsp_object *object, u32 cmd, u32 repc)
 		return argv;
 
 	ret = nvkm_gsp_rm_ctrl_push(object, &argv, repc);
-	if (ret)
+	if (ret) {
+		/* push may keep the reply on an RM status error (callers such as
+		 * DP AUX read retry data from it); rd has no such consumer.
+		 */
+		object->client->gsp->rm->api->ctrl->done(object, argv);
 		return ERR_PTR(ret);
+	}
 	return argv;
 }
 

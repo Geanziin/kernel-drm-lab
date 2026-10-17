@@ -17,6 +17,7 @@ struct nvkm_rm_impl {
 
 struct nvkm_rm {
 	struct nvkm_device *device;
+	const char *version;
 	const struct nvkm_rm_gpu *gpu;
 	const struct nvkm_rm_wpr *wpr;
 	const struct nvkm_rm_api *api;
@@ -31,6 +32,24 @@ struct nvkm_rm_wpr {
 	bool offset_set_by_acr;
 };
 
+/* Units: percent 0..100, Hz, millidegree Celsius, microwatt. */
+enum nvkm_rm_telemetry {
+	NVKM_RM_TM_GPU_BUSY_PCT,
+	NVKM_RM_TM_ENCODER_BUSY_PCT,
+	NVKM_RM_TM_DECODER_BUSY_PCT,
+	NVKM_RM_TM_GPU_CLOCK_HZ,
+	NVKM_RM_TM_MEMORY_CLOCK_HZ,
+	NVKM_RM_TM_GPU_TEMP_MC,
+	NVKM_RM_TM_POWER_AVG_UW,
+	NVKM_RM_TM_POWER_CAP_UW,
+	NVKM_RM_TM_POWER_CAP_MAX_UW,
+};
+
+/* Fields of one FIFO device-info entry consumed by the shared runlist ctor. */
+struct nvkm_rm_fifo_device {
+	u32 eng_desc, rm_engine_type, runlist, runlist_pri_base;
+};
+
 struct nvkm_rm_api {
 	const struct nvkm_rm_api_gsp {
 		void (*set_rmargs)(struct nvkm_gsp *, bool resume);
@@ -41,6 +60,19 @@ struct nvkm_rm_api {
 		void (*drop_post_nocat_record)(struct nvkm_gsp *);
 		u32 (*sr_data_size)(struct nvkm_gsp *);
 	} *gsp;
+
+	/* Optional live telemetry from GSP-RM. read() returns -ENODEV when the
+	 * producer is absent and -ESTALE/-ENODATA when no fresh sample exists;
+	 * callers must report "unavailable", never a substitute value.
+	 */
+	const struct nvkm_rm_api_telemetry {
+		int (*read)(struct nvkm_gsp *, enum nvkm_rm_telemetry, s64 *value);
+	} *telemetry;
+
+	const struct nvkm_rm_api_therm {
+		int (*gpu_sensor)(struct nvkm_gsp *, u32 *sensor);
+		int (*temp_get)(struct nvkm_gsp *, u32 sensor, long *millidegrees);
+	} *therm;
 
 	const struct nvkm_rm_api_rpc {
 		void *(*get)(struct nvkm_gsp *, u32 fn, u32 argc);
@@ -109,6 +141,11 @@ struct nvkm_rm_api {
 	} *disp;
 
 	const struct nvkm_rm_api_fifo {
+		/* Optional: fill a version-neutral copy of the FIFO device-info
+		 * table. Absent = legacy NV2080_CTRL_FIFO_DEVICE_ENTRY layout.
+		 */
+		int (*device_info)(struct nvkm_gsp *, struct nvkm_rm_fifo_device *,
+				   u32 limit, u32 *count);
 		int (*xlat_rm_engine_type)(u32 rm_engine_type,
 					   enum nvkm_subdev_type *, int *nv2080_type);
 		int (*ectx_size)(struct nvkm_fifo *);
@@ -185,6 +222,8 @@ extern const struct nvkm_rm_impl r570_rm_gh100;
 extern const struct nvkm_rm_impl r570_rm_gb10x;
 extern const struct nvkm_rm_impl r570_rm_gb20x;
 extern const struct nvkm_rm_api_gsp r570_gsp;
+extern const struct nvkm_rm_api_therm r615_therm;
+extern const struct nvkm_rm_api_telemetry r615_telemetry_api;
 extern const struct nvkm_rm_api_client r570_client;
 extern const struct nvkm_rm_api_fbsr r570_fbsr;
 extern const struct nvkm_rm_api_disp r570_disp;
@@ -193,4 +232,19 @@ extern const struct nvkm_rm_api_gr r570_gr;
 int r570_gr_gpc_mask(struct nvkm_gsp *, u32 *mask);
 int r570_gr_tpc_mask(struct nvkm_gsp *, int gpc, u32 *mask);
 extern const struct nvkm_rm_api_engine r570_ofa;
+
+extern const struct nvkm_rm_impl r615_rm_ga102;
+extern const struct nvkm_rm_api_gsp r615_gsp;
+extern const struct nvkm_rm_api_rpc r615_rpc_api;
+extern const struct nvkm_rm_api_ctrl r615_ctrl;
+extern const struct nvkm_rm_api_alloc r615_alloc;
+extern const struct nvkm_rm_api_fifo r615_fifo;
+extern const struct nvkm_rm_api_disp r615_disp;
+enum nvkm_suspend_state;
+int r615_gsp_oneinit(struct nvkm_gsp *gsp);
+int r615_gsp_init(struct nvkm_gsp *gsp);
+int r615_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend);
+void r615_gsp_dtor(struct nvkm_gsp *gsp);
+struct nvkm_gsp_fwif;
+int r615_gsp_load(struct nvkm_gsp *gsp, int ver, const struct nvkm_gsp_fwif *fwif);
 #endif

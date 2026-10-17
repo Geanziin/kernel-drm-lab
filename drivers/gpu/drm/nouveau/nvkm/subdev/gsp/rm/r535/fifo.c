@@ -162,8 +162,11 @@ r535_chan_ramfc_write(struct nvkm_chan *chan, u64 offset, u64 length, u32 devm, 
 
 	if (unlikely(device->gr && !device->gr->engine.subdev.oneinit)) {
 		ret = nvkm_subdev_oneinit(&device->gr->engine.subdev);
-		if (ret)
+		if (ret) {
+			nvkm_error(&fifo->engine.subdev, "chid %d: GR one-time init failed, %d\n",
+				   chan->id, ret);
 			return ret;
+		}
 	}
 
 	nvkm_runl_foreach_engn(engn, chan->cgrp->runl) {
@@ -185,8 +188,11 @@ r535_chan_ramfc_write(struct nvkm_chan *chan, u64 offset, u64 length, u32 devm, 
 				      nvkm_memory_addr(chan->userd.mem) + chan->userd.base,
 				      chan->rm.mthdbuf.addr, chan->vmm, offset, length,
 				      &chan->rm.object);
-	if (ret)
+	if (ret) {
+		nvkm_error(&fifo->engine.subdev, "chid %d: RM channel alloc (eng %u) failed, %d\n",
+			   chan->id, eT, ret);
 		return ret;
+	}
 
 	if (1) {
 		NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS *ctrl;
@@ -202,8 +208,11 @@ r535_chan_ramfc_write(struct nvkm_chan *chan, u64 offset, u64 length, u32 devm, 
 			ctrl->engineType = eT;
 
 			ret = nvkm_gsp_rm_ctrl_wr(&chan->rm.object, ctrl);
-			if (ret)
+			if (ret) {
+				nvkm_error(&fifo->engine.subdev, "chid %d: BIND eng %u failed, %d\n",
+					   chan->id, eT, ret);
 				return ret;
+			}
 		}
 
 		ctrl = nvkm_gsp_rm_ctrl_get(&chan->rm.object,
@@ -213,6 +222,9 @@ r535_chan_ramfc_write(struct nvkm_chan *chan, u64 offset, u64 length, u32 devm, 
 
 		ctrl->bEnable = 1;
 		ret = nvkm_gsp_rm_ctrl_wr(&chan->rm.object, ctrl);
+		if (ret)
+			nvkm_error(&fifo->engine.subdev, "chid %d: GPFIFO_SCHEDULE failed, %d\n",
+				   chan->id, ret);
 	}
 
 	return ret;
@@ -467,19 +479,45 @@ r535_fifo_runl_ctor(struct nvkm_fifo *fifo)
 	u32 count = chids - first;
 	int ret;
 	NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS *ctrl;
+	struct nvkm_rm_fifo_device *dev;
+	u32 entries = 0;
 
 	if ((ret = nvkm_chid_new(&nvkm_chan_event, subdev, chids, first, count, &fifo->cgid)) ||
 	    (ret = nvkm_chid_new(&nvkm_chan_event, subdev, chids, first, count, &fifo->chid)))
 		return ret;
 
-	ctrl = nvkm_gsp_rm_ctrl_rd(&gsp->internal.device.subdevice,
-				   NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE, sizeof(*ctrl));
-	if (WARN_ON(IS_ERR(ctrl)))
-		return PTR_ERR(ctrl);
 
-	for (int i = 0; i < ctrl->numEntries; i++) {
-		const u32 addr = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST_PRI_BASE];
-		const u32 id = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
+	dev = kcalloc(NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_MAX_ENTRIES, sizeof(*dev), GFP_KERNEL);
+	if (!dev)
+		return -ENOMEM;
+	if (rm->api->fifo->device_info) {
+		ret = rm->api->fifo->device_info(gsp, dev,
+						 NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_MAX_ENTRIES,
+						 &entries);
+		if (WARN_ON(ret)) {
+			kfree(dev);
+			return ret;
+		}
+	} else {
+		ctrl = nvkm_gsp_rm_ctrl_rd(&gsp->internal.device.subdevice,
+					   NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE, sizeof(*ctrl));
+		if (WARN_ON(IS_ERR(ctrl))) {
+			kfree(dev);
+			return PTR_ERR(ctrl);
+		}
+		entries = min_t(u32, ctrl->numEntries, NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_MAX_ENTRIES);
+		for (u32 i = 0; i < entries; i++) {
+			dev[i].eng_desc = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_ENG_DESC];
+			dev[i].rm_engine_type = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RM_ENGINE_TYPE];
+			dev[i].runlist = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
+			dev[i].runlist_pri_base = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST_PRI_BASE];
+		}
+		nvkm_gsp_rm_ctrl_done(&gsp->internal.device.subdevice, ctrl);
+	}
+
+	for (u32 i = 0; i < entries; i++) {
+		const u32 addr = dev[i].runlist_pri_base;
+		const u32 id = dev[i].runlist;
 
 		runl = nvkm_runl_get(fifo, id, addr);
 		if (!runl) {
@@ -489,10 +527,10 @@ r535_fifo_runl_ctor(struct nvkm_fifo *fifo)
 		}
 	}
 
-	for (int i = 0; i < ctrl->numEntries; i++) {
-		const u32 addr = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST_PRI_BASE];
-		const u32 rmid = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RM_ENGINE_TYPE];
-		const u32 id = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
+	for (u32 i = 0; i < entries; i++) {
+		const u32 addr = dev[i].runlist_pri_base;
+		const u32 rmid = dev[i].rm_engine_type;
+		const u32 id = dev[i].runlist;
 		enum nvkm_subdev_type type;
 		int inst, nv2080;
 
@@ -556,10 +594,10 @@ r535_fifo_runl_ctor(struct nvkm_fifo *fifo)
 			continue;
 		}
 
-		engn->rm.desc = ctrl->entries[i].engineData[ENGINE_INFO_TYPE_ENG_DESC];
+		engn->rm.desc = dev[i].eng_desc;
 	}
 
-	nvkm_gsp_rm_ctrl_done(&gsp->internal.device.subdevice, ctrl);
+	kfree(dev);
 
 	{
 		NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *ctrl;

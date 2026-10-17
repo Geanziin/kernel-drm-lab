@@ -10,7 +10,7 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		4
-#define DRIVER_PATCHLEVEL	2
+#define DRIVER_PATCHLEVEL	3
 
 /*
  * 1.1.1:
@@ -39,6 +39,8 @@
  *      - add variable page sizes and compression for Turing+
  * 1.4.2:
  *      - tell userspace LPTE/SPTE races are fixed.
+ * 1.4.3:
+ *      - allow NVDEC channel selection through ABI16.
  */
 
 #include <linux/notifier.h>
@@ -66,6 +68,7 @@ struct nouveau_channel;
 struct platform_device;
 
 #include "nouveau_fence.h"
+#include "nouveau_engine_busy.h"
 #include "nouveau_bios.h"
 #include "nouveau_sched.h"
 #include "nouveau_vmm.h"
@@ -246,6 +249,7 @@ struct nouveau_drm {
 		int type_ncoh[2];
 		struct mutex io_reserve_mutex;
 		struct list_head io_reserve_lru;
+		bool meminfo_registered;
 	} ttm;
 
 	/* GEM interface support */
@@ -295,6 +299,9 @@ struct nouveau_drm {
 
 	/* power management */
 	struct nouveau_hwmon *hwmon;
+	struct device *gsp_tm_hwmon;
+	struct nouveau_engine_busy video_busy[NOUVEAU_BUSY_NR];
+	bool gsp_tm_group;
 	struct nouveau_debugfs *debugfs;
 
 	/* led management */

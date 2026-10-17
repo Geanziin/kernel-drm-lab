@@ -88,8 +88,12 @@ r535_gr_promote_ctx(struct r535_gr *gr, bool golden, struct nvkm_vmm *vmm,
 					      NVKM_MEM_TARGET_INST : NVKM_MEM_TARGET_INST_SR_LOST,
 					      gr->ctxbuf[i].size, 1 << gr->ctxbuf[i].page,
 					      gr->ctxbuf[i].init, &pmem[i]);
-			if (WARN_ON(ret))
+			if (ret) {
+				nvkm_error(subdev, "promote buf %u: alloc size %x page %u failed, %d\n",
+					   gr->ctxbuf[i].bufferId, gr->ctxbuf[i].size,
+					   gr->ctxbuf[i].page, ret);
 				return ret;
+			}
 
 			if (gr->ctxbuf[i].bufferId ==
 					NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP)
@@ -112,12 +116,19 @@ r535_gr_promote_ctx(struct r535_gr *gr, bool golden, struct nvkm_vmm *vmm,
 			ret = nvkm_vmm_get_locked(vmm, false, true, false, 0, gr->ctxbuf[i].align,
 						  nvkm_memory_size(pmem[i]), &pvma[i]);
 			mutex_unlock(&vmm->mutex.vmm);
-			if (ret)
+			if (ret) {
+				nvkm_error(subdev, "promote buf %u: va get size %llx align %u failed, %d\n",
+					   gr->ctxbuf[i].bufferId, nvkm_memory_size(pmem[i]),
+					   gr->ctxbuf[i].align, ret);
 				return ret;
+			}
 
 			ret = nvkm_memory_map(pmem[i], 0, vmm, pvma[i], &args, sizeof(args));
-			if (ret)
+			if (ret) {
+				nvkm_error(subdev, "promote buf %u: map failed, %d\n",
+					   gr->ctxbuf[i].bufferId, ret);
 				return ret;
+			}
 
 			entry->gpuVirtAddr = pvma[i]->addr;
 		}
@@ -286,21 +297,26 @@ r535_gr_oneinit(struct nvkm_gr *base)
 		struct nvkm_vma *vma[R515_GR_MAX_CTXBUFS];
 	} golden = {};
 	struct nvkm_gsp_object threed;
+	const char *step = "start";
 	int ret;
 
 	/* Allocate a channel to use for golden context init. */
+	step = "golden inst";
 	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, 0x12000, 0, true, &golden.inst);
 	if (ret)
 		goto done;
 
+	step = "golden vmm";
 	ret = nvkm_vmm_new(device, 0x1000, 0, NULL, 0, NULL, "grGoldenVmm", &golden.vmm);
 	if (ret)
 		goto done;
 
+	step = "golden vaspace";
 	ret = r535_mmu_vaspace_new(golden.vmm, NVKM_RM_VASPACE, false);
 	if (ret)
 		goto done;
 
+	step = "golden channel";
 	ret = rm->api->fifo->chan.alloc(&golden.vmm->rm.device, NVKM_RM_CHAN(0),
 					1, 0, true, rm->api->fifo->rsvd_chids,
 					nvkm_memory_addr(golden.inst),
@@ -315,16 +331,19 @@ r535_gr_oneinit(struct nvkm_gr *base)
 	 *
 	 * Also build the information that'll be used to create channel contexts.
 	 */
+	step = "ctxbuf info";
 	ret = rm->api->gr->get_ctxbufs_and_zcull_info(gr);
 	if (ret)
 		goto done;
 
 	/* Promote golden context to RM. */
+	step = "promote golden";
 	ret = r535_gr_promote_ctx(gr, true, golden.vmm, gr->ctxbuf_mem, golden.vma, &golden.chan);
 	if (ret)
 		goto done;
 
 	/* Allocate 3D class on channel to trigger golden context init in RM. */
+	step = "threed alloc";
 	ret = nvkm_gsp_rm_alloc(&golden.chan, NVKM_RM_THREED, rm->gpu->gr.class.threed, 0, &threed);
 	if (ret)
 		goto done;
@@ -332,6 +351,8 @@ r535_gr_oneinit(struct nvkm_gr *base)
 	/* There's no need to keep the golden channel around, as RM caches the context. */
 	nvkm_gsp_rm_free(&threed);
 done:
+	if (ret)
+		nvkm_error(subdev, "golden context: %s failed, %d\n", step, ret);
 	nvkm_gsp_rm_free(&golden.chan);
 	for (int i = gr->ctxbuf_nr - 1; i >= 0; i--)
 		nvkm_vmm_put(golden.vmm, &golden.vma[i]);

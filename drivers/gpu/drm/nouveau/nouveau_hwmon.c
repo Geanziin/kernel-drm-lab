@@ -28,14 +28,30 @@
 #include <linux/power_supply.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
+#include <linux/pm_runtime.h>
 
 #include "nouveau_drv.h"
 #include "nouveau_hwmon.h"
 
 #include <nvkm/subdev/iccsense.h>
 #include <nvkm/subdev/volt.h>
+#include <nvkm/subdev/gsp.h>
+#include <nvkm/core/option.h>
 
 #if defined(CONFIG_HWMON) || (defined(MODULE) && defined(CONFIG_HWMON_MODULE))
+
+static struct nvkm_gsp *
+nouveau_hwmon_gsp(struct nouveau_drm *drm)
+{
+	struct nvkm_gsp *gsp = nvxx_device(drm)->gsp;
+
+	if (!nvkm_gsp_rm(gsp) || !gsp->rm || !gsp->rm->api->therm)
+		return NULL;
+	/* The thermal RPC ABI still requires validation with the loaded firmware. */
+	if (!nvkm_boolopt(nvxx_device(drm)->cfgopt, "NvGspHwmon", false))
+		return NULL;
+	return gsp;
+}
 
 static ssize_t
 nouveau_hwmon_show_temp1_auto_point1_pwm(struct device *d,
@@ -273,6 +289,10 @@ nouveau_temp_is_visible(const void *data, u32 attr, int channel)
 {
 	struct nouveau_drm *drm = nouveau_drm((struct drm_device *)data);
 	struct nvkm_therm *therm = nvxx_therm(drm);
+	struct nouveau_hwmon *hwmon = drm->hwmon;
+
+	if (hwmon && hwmon->gsp_temp)
+		return attr == hwmon_temp_input ? 0444 : 0;
 
 	if (!therm || !therm->attr_get || nvkm_therm_temp_get(therm) < 0)
 		return 0;
@@ -368,7 +388,26 @@ nouveau_temp_read(struct device *dev, u32 attr, int channel, long *val)
 	struct drm_device *drm_dev = dev_get_drvdata(dev);
 	struct nouveau_drm *drm = nouveau_drm(drm_dev);
 	struct nvkm_therm *therm = nvxx_therm(drm);
+	struct nouveau_hwmon *hwmon = drm->hwmon;
+	struct nvkm_gsp *gsp;
 	int ret;
+
+	if (hwmon && hwmon->gsp_temp) {
+		if (attr != hwmon_temp_input)
+			return -EOPNOTSUPP;
+		if (drm_dev->switch_power_state == DRM_SWITCH_POWER_OFF)
+			return -EINVAL;
+		gsp = nouveau_hwmon_gsp(drm);
+		if (!gsp)
+			return -ENODEV;
+		ret = pm_runtime_resume_and_get(drm_dev->dev);
+		if (ret < 0)
+			return ret;
+		ret = gsp->rm->api->therm->temp_get(gsp, hwmon->gsp_temp_sensor, val);
+		pm_runtime_mark_last_busy(drm_dev->dev);
+		pm_runtime_put_autosuspend(drm_dev->dev);
+		return ret;
+	}
 
 	if (!therm || !therm->attr_get)
 		return -EOPNOTSUPP;
@@ -378,7 +417,9 @@ nouveau_temp_read(struct device *dev, u32 attr, int channel, long *val)
 		if (drm_dev->switch_power_state != DRM_SWITCH_POWER_ON)
 			return -EINVAL;
 		ret = nvkm_therm_temp_get(therm);
-		*val = ret < 0 ? ret : (ret * 1000);
+		if (ret < 0)
+			return ret;
+		*val = (long)ret * 1000;
 		break;
 	case hwmon_temp_max:
 		*val = therm->attr_get(therm, NVKM_THERM_ATTR_THRS_DOWN_CLK)
@@ -668,12 +709,14 @@ nouveau_hwmon_init(struct drm_device *dev)
 	struct nvkm_therm *therm = nvxx_therm(drm);
 	struct nvkm_volt *volt = nvxx_volt(drm);
 	const struct attribute_group *special_groups[N_ATTR_GROUPS];
+	struct nvkm_gsp *gsp = nouveau_hwmon_gsp(drm);
 	struct nouveau_hwmon *hwmon;
 	struct device *hwmon_dev;
+	long temperature;
 	int ret = 0;
 	int i = 0;
 
-	if (!iccsense && !therm && !volt) {
+	if (!iccsense && !therm && !volt && !gsp) {
 		NV_DEBUG(drm, "Skipping hwmon registration\n");
 		return 0;
 	}
@@ -682,6 +725,23 @@ nouveau_hwmon_init(struct drm_device *dev)
 	if (!hwmon)
 		return -ENOMEM;
 	hwmon->dev = dev;
+
+	if (gsp && !therm) {
+		ret = gsp->rm->api->therm->gpu_sensor(gsp, &hwmon->gsp_temp_sensor);
+		if (!ret)
+			ret = gsp->rm->api->therm->temp_get(gsp, hwmon->gsp_temp_sensor,
+						       &temperature);
+		if (!ret)
+			hwmon->gsp_temp = true;
+		else
+			NV_DEBUG(drm, "GSP temperature unavailable: %d\n", ret);
+	}
+
+	if (!iccsense && !therm && !volt && !hwmon->gsp_temp) {
+		drm->hwmon = NULL;
+		kfree(hwmon);
+		return 0;
+	}
 
 	if (therm && therm->attr_get && therm->attr_set) {
 		if (nvkm_therm_temp_get(therm) >= 0)
@@ -697,6 +757,8 @@ nouveau_hwmon_init(struct drm_device *dev)
 	if (IS_ERR(hwmon_dev)) {
 		ret = PTR_ERR(hwmon_dev);
 		NV_ERROR(drm, "Unable to register hwmon device: %d\n", ret);
+		drm->hwmon = NULL;
+		kfree(hwmon);
 		return ret;
 	}
 

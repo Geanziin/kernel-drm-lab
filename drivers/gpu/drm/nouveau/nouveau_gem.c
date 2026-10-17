@@ -938,6 +938,12 @@ revalidate:
 		goto out;
 	}
 
+	/* Video channels submit through the legacy pushbuf ioctl (VA-API/NVK
+	 * video winsys), so account their busy time here as well.
+	 */
+	if (chan->busy_engine > NOUVEAU_BUSY_NONE && chan->busy_engine < NOUVEAU_BUSY_NR)
+		nouveau_engine_busy_track(&drm->video_busy[chan->busy_engine], &fence->base);
+
 	if (sync) {
 		if (!(ret = nouveau_fence_wait(fence, false, false))) {
 			if ((ret = dma_fence_get_status(&fence->base)) == 1)
