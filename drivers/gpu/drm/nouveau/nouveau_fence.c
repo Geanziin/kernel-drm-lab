@@ -374,9 +374,9 @@ nouveau_fence_sync(struct nouveau_bo *nvbo, struct nouveau_channel *chan,
 
 				rcu_read_lock();
 				prev = rcu_dereference(f->channel);
-				local = prev && prev->cli->drm == chan->cli->drm;
+				local = prev && prev->cli && chan->cli && prev->cli->drm == chan->cli->drm;
 				if (local && (prev == chan ||
-					      fctx->sync(f, prev, chan) == 0))
+					      (fctx && fctx->sync && fctx->sync(f, prev, chan) == 0)))
 					must_wait = false;
 				rcu_read_unlock();
 				if (!must_wait)
