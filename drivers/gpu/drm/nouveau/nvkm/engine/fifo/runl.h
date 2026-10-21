@@ -40,6 +40,7 @@ struct nvkm_engn {
 #define ENGN_PRINT(e,l,p,f,a...)                                                           \
 	RUNL_PRINT((e)->runl, l, p, "%02d[%8s]:"f, (e)->id, (e)->engine->subdev.name, ##a)
 #define ENGN_DEBUG(e,f,a...) ENGN_PRINT((e), DEBUG,   info, " "f"\n", ##a)
+#define ENGN_ERROR(e,f,a...) ENGN_PRINT((e), ERROR,    err, " "f"\n", ##a)
 
 struct nvkm_runl {
 	const struct nvkm_runl_func {

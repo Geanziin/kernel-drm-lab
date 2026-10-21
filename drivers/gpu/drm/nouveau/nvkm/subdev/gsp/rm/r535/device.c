@@ -133,10 +133,17 @@ r535_gsp_device_ctor(struct nvkm_gsp_client *client, struct nvkm_gsp_device *dev
 		return ret;
 
 	ret = r535_gsp_subdevice_ctor(device);
-	if (ret)
+	if (ret) {
 		nvkm_gsp_rm_free(&device->object);
+		return ret;
+	}
 
-	return ret;
+	/* P-State is a per-GPU property: the one-shot P0/AC request runs from the
+	 * GSP boot path (rm/perf.c), never from this per-allocation hook.  Boot
+	 * 19: the copy that lived here re-issued two RM controls per GSP device
+	 * (93 times in one boot) and logged success without checking the status.
+	 */
+	return 0;
 }
 
 const struct nvkm_rm_api_device

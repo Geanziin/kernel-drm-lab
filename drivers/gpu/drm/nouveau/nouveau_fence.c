@@ -366,6 +366,9 @@ nouveau_fence_sync(struct nouveau_bo *nvbo, struct nouveau_channel *chan,
 			if (i == 0 && usage == DMA_RESV_USAGE_WRITE)
 				continue;
 
+			if (dma_fence_is_signaled(fence))
+				continue;
+
 			f = nouveau_local_fence(fence, chan->cli->drm);
 			if (f) {
 				struct nouveau_channel *prev;
@@ -488,6 +491,7 @@ static bool nouveau_fence_no_signaling(struct dma_fence *f)
 	 */
 	if (nouveau_fence_is_signaled(f)) {
 		list_del(&fence->head);
+		rcu_assign_pointer(fence->channel, NULL);
 
 		dma_fence_put(&fence->base);
 		return false;

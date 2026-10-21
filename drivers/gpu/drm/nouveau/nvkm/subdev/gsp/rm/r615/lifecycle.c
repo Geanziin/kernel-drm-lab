@@ -28,6 +28,7 @@
 #include "runtime.h"
 #include "sysinfo.h"
 #include "transport.h"
+#include "../perf.h"
 #include "host_exec.h"
 #include "pm.h"
 #include "health.h"
@@ -534,6 +535,16 @@ r615_gsp_init(struct nvkm_gsp *gsp)
 		goto fail_running;
 	nvkm_info(&gsp->subdev, "r615: stage=static_info ok gpcs=%u tpcs=%u fb_regions=%d\n",
 		  gsp->gr.gpcs, gsp->gr.tpcs, gsp->fb.region_nr);
+	/* P-State: one-shot per GSP boot, with the internal subdevice handle that
+	 * get_static_info() just published.  Diagnostic: a refusal or an unsupported
+	 * control never fails the boot (RM keeps arbitrating the level).
+	 */
+	{
+		int pret = nvkm_gsp_perf_max_performance(gsp);
+
+		if (pret)
+			nvkm_warn(&gsp->subdev, "r615: perf P0 request unavailable (%d)\n", pret);
+	}
 	stage = "health";
 	ret = r615_health_start(gsp);
 	if (ret)

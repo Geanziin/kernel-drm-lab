@@ -21,6 +21,8 @@
  */
 #include "priv.h"
 
+#include <linux/string.h>
+
 #include <subdev/fb.h>
 #include <engine/sec2.h>
 
@@ -255,6 +257,14 @@ tu102_gsp_wpr_meta_init(struct nvkm_gsp *gsp)
 	meta->partitionRpcRequestOffset = 0;
 	meta->partitionRpcReplyOffset = 0;
 	meta->verified = 0;
+	/* 615 hybrid: GspFwWprMetaV1 carries the clock-boost flag (BIT0) in
+	 * the byte the legacy struct calls padding[0]; every other byte is
+	 * identical. The 615 producer sets it by default. GA107 + 615 only.
+	 * (A forced verified=0xa0.. probe changed nothing; reverted.)
+	 */
+	if (gsp->rm && gsp->rm->version && !strcmp(gsp->rm->version, "615.78.08") &&
+	    gsp->subdev.device->chipset == 0x177)
+		meta->padding[0] = 1;
 	return 0;
 }
 

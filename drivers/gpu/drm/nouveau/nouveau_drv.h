@@ -5,8 +5,8 @@
 #define DRIVER_AUTHOR		"Nouveau Project"
 #define DRIVER_EMAIL		"nouveau@lists.freedesktop.org"
 
-#define DRIVER_NAME		"nouveau"
-#define DRIVER_DESC		"nVidia Riva/TNT/GeForce/Quadro/Tesla/Tegra K1+"
+#define DRIVER_NAME		"nvgd"
+#define DRIVER_DESC		"nvgd (NVIDIA OpenGL 4.6 Next-Gen Driver)"
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		4

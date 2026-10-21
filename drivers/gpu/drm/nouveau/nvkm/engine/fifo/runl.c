@@ -112,20 +112,27 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 			continue;
 		}
 
-		ENGN_DEBUG(engn, "resetting...");
+		ENGN_ERROR(engn, "resetting...");
 		/*TODO: can we do something less of a potential catastrophe on failure? */
 		WARN_ON(nvkm_engine_reset(engn->engine));
 	}
 
-	/* Submit runlist update, and clear any remaining exception state. */
-	runl->func->update(runl);
+	/* Submit runlist update, and clear any remaining exception state.
+	 * GSP-RM-managed runlists (r535/r615) leave update/wait unset; the
+	 * firmware owns the hardware runlist, so there is nothing to submit
+	 * or wait for from the host.
+	 */
+	if (runl->func->update)
+		runl->func->update(runl);
 	if (runl->func->fault_clear)
 		runl->func->fault_clear(runl);
 
 	/* Unblock runlist processing. */
 	while (rc--)
 		nvkm_runl_allow(runl);
-	runl->func->wait(runl);
+	if (runl->func->wait)
+		runl->func->wait(runl);
+	RUNL_ERROR(runl, "rc complete");
 }
 
 static void

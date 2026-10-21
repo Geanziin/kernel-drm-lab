@@ -21,7 +21,14 @@
  */
 #include <rm/rpc.h>
 
+#include <core/device.h>
+
 #include "nvrm/rpcfn.h"
+
+/* Candidate 10 hybrid step 3: 615 status counters live only in registers
+ * (the legacy shared mirror aliases entryOff). Gate shared with gsp.c.
+ */
+#include "hybrid615.h"
 
 #define GSP_MSG_MIN_SIZE GSP_PAGE_SIZE
 #define GSP_MSG_MAX_SIZE (GSP_MSG_MIN_SIZE * 16)
@@ -152,6 +159,9 @@ r535_gsp_msgq_wait(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *ptime)
 	do {
 		u32 wptr = *gsp->msgq.wptr;
 
+		if (r535_gsp_hybrid615(gsp))
+			wptr = nvkm_rd32(gsp->subdev.device, HYBRID615_MSGQ_RX_HEAD);
+
 		used = wptr + gsp->msgq.cnt - rptr;
 		if (used >= gsp->msgq.cnt)
 			used -= gsp->msgq.cnt;
@@ -280,6 +290,10 @@ r535_gsp_msgq_recv_one_elem(struct nvkm_gsp *gsp,
 
 	mb();
 	(*gsp->msgq.rptr) = rptr;
+	if (r535_gsp_hybrid615(gsp)) {
+		wmb();
+		nvkm_wr32(gsp->subdev.device, HYBRID615_MSGQ_RX_TAIL, rptr);
+	}
 	return buf;
 }
 

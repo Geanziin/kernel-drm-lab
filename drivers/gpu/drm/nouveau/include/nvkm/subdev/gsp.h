@@ -280,6 +280,27 @@ struct nvkm_gsp {
 	bool r615_suspended;
 	u8 r615_teardown_stage;
 
+	/* Candidate 10 hybrid, step 1: 615 new-layout RMARGS + ucodes bindata
+	 * while driving 615 blobs through the proven 570 boot path. GA107 +
+	 * 615.78.08 only, version-gated; legacy entries never touch it.
+	 */
+	struct {
+		struct nvkm_firmware fw;	/* ucodes image (sgt, dma-mapped) */
+		struct nvkm_gsp_radix3 radix3;	/* bindata radix3 over fw pages */
+		struct nvkm_gsp_mem rmargs;	/* new-layout RMARGS page */
+		struct nvkm_gsp_mem state_monitor; /* separate 4 KiB coherent RM state */
+		struct r615_msgq *queue; /* prepared before Booter, never reset live */
+		struct nvkm_gsp_mem logs[5]; /* MNOC, DBG, ROOT, RMON, KRNL */
+		/* Driver-owned cmd-queue counters: the v2 header has no shared
+		 * writePtr/readPtr mirrors (counters are register-only), so
+		 * the legacy send path is pointed here until it is ported.
+		 * Only a handful of messages are ever staged pre-INIT_DONE.
+		 */
+		u32 cmd_wptr, cmd_rptr;
+		bool enabled;
+		bool quarantined; /* failed reset: never free exposed boot DMA */
+	} hybrid615;
+
 #ifdef CONFIG_DEBUG_FS
 	/*
 	 * Logging buffers in debugfs. The wrapper objects need to remain

@@ -865,6 +865,24 @@ revalidate:
 		ret = nvif_chan_gpfifo_wait(&chan->chan, req->nr_push + 1, 16);
 		if (ret) {
 			NV_PRINTK(err, cli, "nv50cal_space: %d\n", ret);
+			if (ret == -ETIMEDOUT) {
+				/* The PBDMA has not consumed a single GPFIFO entry for a
+				 * full second; the channel is wedged beyond recovery and
+				 * none of its pending fences will ever signal.  Userspace
+				 * retries the same pushbuf forever (PUSH_KICK discards the
+				 * error), each retry burning a second of kernel busy-wait.
+				 *
+				 * Kill the channel so its fence context signals every
+				 * pending fence with -ENODEV: that unblocks any waiter
+				 * (compositor dma_resv waits on shared buffers, EGL
+				 * syncs) and makes further pushbufs fail fast with
+				 * -ENODEV instead of timing out again.
+				 */
+				NV_PRINTK(err, cli,
+					  "pushbuf timeout, killing channel %d\n",
+					  chan->chid);
+				nouveau_channel_kill(chan);
+			}
 			goto out;
 		}
 

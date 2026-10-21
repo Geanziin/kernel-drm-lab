@@ -145,6 +145,8 @@ tu102_fifo_intr_ctxsw_timeout_info(struct nvkm_engn *engn, u32 info)
 	if (info & 0xc0000000)
 		return;
 
+	ENGN_ERROR(engn, "CTXSW_TIMEOUT info=%08x", info);
+
 	/* Determine channel group the engine is stuck on, and schedule recovery. */
 	switch (info & 0x0000c000) {
 	case 0x00004000: /* LOAD */

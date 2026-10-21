@@ -38,6 +38,23 @@
 #include "nvrm/msgfn.h"
 #include "nvrm/event.h"
 #include "nvrm/fifo.h"
+#include "../perf.h"
+
+#include <linux/dma-mapping.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/pci.h>
+#include <asm-generic/video.h>
+
+/* Candidate 10 hybrid step 1: reuse the unit-tested 615 RMARGS serializer
+ * on top of the proven r535 allocators. Same module, no new dependency.
+ */
+#include "../r615/boot.h"
+#include "../r615/msgq.h"
+#include "../r615/message.h"
+#include "../r615/nvkv.h"
+#include "../r615/rpc.h"
+#include "../r615/sysinfo.h"
 
 #include <linux/acpi.h>
 #include <linux/ctype.h>
@@ -299,6 +316,10 @@ r535_gsp_postinit(struct nvkm_gsp *gsp)
 	ret = rmapi->gsp->get_static_info(gsp);
 	if (WARN_ON(ret))
 		return ret;
+
+	/* One-shot P-State request on the now-published internal subdevice. */
+	if (nvkm_gsp_perf_max_performance(gsp))
+		nvkm_warn(&gsp->subdev, "perf P0 request not applied\n");
 
 	INIT_WORK(&gsp->msgq.work, r535_gsp_msgq_work);
 
@@ -1131,6 +1152,16 @@ r535_gsp_msg_run_cpu_sequencer(void *priv, u32 fn, void *repv, u32 repc)
 	return 0;
 }
 
+/* Candidate 10 hybrid: 615 deltas on the proven 570 path. Gate and queue
+ * register map live in hybrid615.h (shared with rpc.c); the 615 RMARGS
+ * serializer stays in r615/boot.c.
+ */
+#include "hybrid615.h"
+
+static int r535_gsp_hybrid_rmargs_init(struct nvkm_gsp *gsp);
+static void r535_gsp_hybrid_dtor(struct nvkm_gsp *gsp);
+static const struct r615_msgq_ops r535_gsp_hybrid_msgq_ops;
+
 static int
 r535_gsp_shared_init(struct nvkm_gsp *gsp)
 {
@@ -1215,10 +1246,19 @@ r535_gsp_rmargs_init(struct nvkm_gsp *gsp, bool resume)
 		if (ret)
 			return ret;
 
+		if (r535_gsp_hybrid615(gsp))
+			return r535_gsp_hybrid_rmargs_init(gsp);
+
 		ret = nvkm_gsp_mem_ctor(gsp, 0x1000, &gsp->rmargs);
 		if (ret)
 			return ret;
 	}
+
+	/* Suspend/resume is unsupported on the 615 hybrid; fail closed instead
+	 * of filling the legacy page the 615 firmware no longer reads.
+	 */
+	if (r535_gsp_hybrid615(gsp))
+		return -EOPNOTSUPP;
 
 	gsp->rm->api->gsp->set_rmargs(gsp, resume);
 	return 0;
@@ -1549,15 +1589,54 @@ r535_gsp_libos_init(struct nvkm_gsp *gsp)
 	args[2].loc  = LIBOS_MEMORY_REGION_LOC_SYSMEM;
 	create_pte_array(gsp->logrm.data + sizeof(u64), gsp->logrm.addr, gsp->logrm.size);
 
+	/* Hybrid 615 step 2: the 615 baremetal producer registers 8 log
+	 * regions (INIT, INTR, RM, MNOC, DBG, ROOT, RMON, KRNL); the
+	 * 3-region table may stall 615 LibOS init before queue setup. Same
+	 * allocator + PTE pattern as the legacy three (word1 = base PA in
+	 * both layouts); sizes are the 615 release defaults (ROOT/RMON 4K).
+	 */
+	static const struct { const char *name; u32 size; } hybrid_logs[] = {
+		{ "LOGMNOC", 0x10000 }, { "LOGDBG", 0x10000 },
+		{ "LOGROOT", 0x01000 }, { "LOGRMON", 0x01000 },
+		{ "LOGKRNL", 0x10000 },
+	};
+	unsigned rmargs_idx = 3;
+
+	if (r535_gsp_hybrid615(gsp)) {
+		for (unsigned i = 0; i < ARRAY_SIZE(hybrid_logs); i++) {
+			ret = nvkm_gsp_mem_ctor(gsp, hybrid_logs[i].size,
+						&gsp->hybrid615.logs[i]);
+			if (ret) {
+				while (i--)
+					nvkm_gsp_mem_dtor(&gsp->hybrid615.logs[i]);
+				return ret;
+			}
+			args[3 + i].id8  = r535_gsp_libos_id8(hybrid_logs[i].name);
+			args[3 + i].pa   = gsp->hybrid615.logs[i].addr;
+			args[3 + i].size = gsp->hybrid615.logs[i].size;
+			args[3 + i].kind = LIBOS_MEMORY_REGION_CONTIGUOUS;
+			args[3 + i].loc  = LIBOS_MEMORY_REGION_LOC_SYSMEM;
+			create_pte_array(gsp->hybrid615.logs[i].data + sizeof(u64),
+					 gsp->hybrid615.logs[i].addr,
+					 gsp->hybrid615.logs[i].size);
+		}
+		rmargs_idx = 8;
+	}
+
 	ret = r535_gsp_rmargs_init(gsp, false);
 	if (ret)
 		return ret;
 
-	args[3].id8  = r535_gsp_libos_id8("RMARGS");
-	args[3].pa   = gsp->rmargs.addr;
-	args[3].size = gsp->rmargs.size;
-	args[3].kind = LIBOS_MEMORY_REGION_CONTIGUOUS;
-	args[3].loc  = LIBOS_MEMORY_REGION_LOC_SYSMEM;
+	args[rmargs_idx].id8  = r535_gsp_libos_id8("RMARGS");
+	if (r535_gsp_hybrid615(gsp)) {
+		args[rmargs_idx].pa   = gsp->hybrid615.rmargs.addr;
+		args[rmargs_idx].size = gsp->hybrid615.rmargs.size;
+	} else {
+		args[rmargs_idx].pa   = gsp->rmargs.addr;
+		args[rmargs_idx].size = gsp->rmargs.size;
+	}
+	args[rmargs_idx].kind = LIBOS_MEMORY_REGION_CONTIGUOUS;
+	args[rmargs_idx].loc  = LIBOS_MEMORY_REGION_LOC_SYSMEM;
 
 #ifdef CONFIG_DEBUG_FS
 	r535_gsp_libos_debugfs_init(gsp);
@@ -1782,6 +1861,170 @@ r535_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
 	return 0;
 }
 
+/* Candidate 10 diagnostic: snapshot GSP/RM progress when the INIT_DONE poll
+ * times out. Distinguishes "GSP never published its status header" (early
+ * stall, same signature as 08/09) from "header published, GSP waiting for
+ * host GSP_INIT" (615 handshake order: GSP-RM keeps polling until the host
+ * sends init messages). Read-only snapshot, no state change.
+ */
+static void
+r535_gsp_init_debug_dump(struct nvkm_gsp *gsp)
+{
+	struct nvkm_device *device = gsp->subdev.device;
+	const u32 *sh = gsp->shm.msgq.ptr;
+	const u64 *log = gsp->loginit.data;
+
+	nvkm_info(&gsp->subdev,
+		  "c10: riscv=%d mbox0=%08x mbox1=%08x qregs %08x %08x %08x %08x\n",
+		  !!nvkm_falcon_riscv_active(&gsp->falcon),
+		  nvkm_falcon_rd32(&gsp->falcon, 0x040),
+		  nvkm_falcon_rd32(&gsp->falcon, 0x044),
+		  nvkm_rd32(device, 0x110c00), nvkm_rd32(device, 0x110c04),
+		  nvkm_rd32(device, 0x110c80), nvkm_rd32(device, 0x110c84));
+	if (sh)
+		nvkm_info(&gsp->subdev,
+			  "c10: status hdr %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			  sh[0], sh[1], sh[2], sh[3], sh[4], sh[5], sh[6], sh[7]);
+	/* CrashCat wayfinder (public Peregrine protocol, read-only): a 0xdead
+	 * signature in DEBUGINFO means the GSP reported a trap/crash instead
+	 * of silently stalling. WFL1 lives in scratch group A (mailboxes) or
+	 * B..E (0x300/0x310/0x320/0x330). Never ack or clear anything here.
+	 */
+	{
+		u32 wfl0 = nvkm_falcon_rd32(&gsp->falcon, 0x094);
+		u32 loc = (wfl0 >> 20) & 0x7;
+		u32 base[4] = { 0x040, 0x300, 0x310, 0x320 };
+		u32 regs[4] = { 0 };
+		int n = 0;
+
+		if (loc >= 1 && loc <= 4) {
+			if (loc == 1)
+				n = 2;
+			else
+				n = 4;
+			for (int i = 0; i < n; i++)
+				regs[i] = nvkm_falcon_rd32(&gsp->falcon,
+							   base[loc - 1] + 4 * i);
+		}
+		nvkm_info(&gsp->subdev,
+			  "c10: crashcat wfl0=%08x sig=%04x ver=%u loc=%u regs %08x %08x %08x %08x\n",
+			  wfl0, wfl0 & 0xffff, (wfl0 >> 16) & 0xf, loc,
+			  regs[0], regs[1], regs[2], regs[3]);
+	}
+	if (device->sec2)
+		nvkm_info(&gsp->subdev, "c10: sec2 mbox %08x %08x\n",
+			  nvkm_falcon_rd32(&device->sec2->falcon, 0x040),
+			  nvkm_falcon_rd32(&device->sec2->falcon, 0x044));
+	/* Final input exoneration (read-only): WPR verified flag (Booter
+	 * writes 0xa0a0.. on success), LibOS table entries, queue PTEs.
+	 * If all match expectations, every host-side 615 input is proven
+	 * correct and the stall is inside Booter/RM-image behavior.
+	 */
+	{
+		const u64 *wpr = gsp->wpr_meta.data;
+		const u64 *pte = gsp->shm.mem.data;
+		const LibosMemoryRegionInitArgument *libos = gsp->libos.data;
+
+		if (wpr)
+			nvkm_info(&gsp->subdev,
+				  "c10: wpr magic=%016llx rev=%llu verified=%016llx heap=%llx+%llx elf=%llx\n",
+				  (unsigned long long)wpr[0], (unsigned long long)wpr[1],
+				  (unsigned long long)wpr[31],
+				  (unsigned long long)wpr[15], (unsigned long long)wpr[16],
+				  (unsigned long long)wpr[17]);
+		if (libos)
+			for (int i = 0; i < 9; i++)
+				nvkm_info(&gsp->subdev,
+					  "c10: libos[%d] id=%016llx pa=%016llx size=%llx k=%u l=%u\n",
+					  i, (unsigned long long)libos[i].id8,
+					  (unsigned long long)libos[i].pa,
+					  (unsigned long long)libos[i].size,
+					  libos[i].kind, libos[i].loc);
+		if (pte)
+			nvkm_info(&gsp->subdev, "c10: pte0=%016llx pte1=%016llx pte128=%016llx\n",
+				  (unsigned long long)pte[0], (unsigned long long)pte[1],
+				  (unsigned long long)pte[128]);
+	}
+	if (log)
+		nvkm_info(&gsp->subdev, "c10: log puts init=%llu intr=%llu rm=%llu\n",
+			  (unsigned long long)log[0],
+			  (unsigned long long)((const u64 *)gsp->logintr.data)[0],
+			  (unsigned long long)((const u64 *)gsp->logrm.data)[0]);
+	if (gsp->hybrid615.enabled && gsp->hybrid615.rmargs.data) {
+		const struct r615_init_args *args = gsp->hybrid615.rmargs.data;
+		static const char *const names[] =
+			{ "mnoc", "dbg", "root", "rmon", "krnl" };
+
+		nvkm_info(&gsp->subdev,
+			  "c10: hybrid rmar ver=%s magic=%08x flags=%llx bindata=%016llx/%llu monitor=%016llx/%llu bytes\n",
+			  gsp->rm && gsp->rm->version ? gsp->rm->version : "?",
+			  args->magic, (unsigned long long)args->flags,
+			  (unsigned long long)args->bindata.address,
+			  (unsigned long long)args->bindata.size,
+			  (unsigned long long)args->state_monitor.address,
+			  (unsigned long long)args->state_monitor.size);
+		for (unsigned i = 0; i < ARRAY_SIZE(names); i++) {
+			const u64 *extra = gsp->hybrid615.logs[i].data;
+
+			if (extra)
+				nvkm_info(&gsp->subdev, "c10: log%s put=%llu\n",
+					  names[i], (unsigned long long)extra[0]);
+		}
+	}
+}
+
+/* Hybrid 615: fill the internal GSP-RM control handles from the decoded
+ * 615 static_info NVKV, mirroring what r535_gsp_get_static_info does via
+ * the legacy GET_GSP_STATIC_INFO RPC.
+ */
+static int
+r535_gsp_hybrid_static_info(struct nvkm_gsp *gsp)
+{
+	const struct r615_static *st = gsp->r615_static;
+
+	if (!st)
+		return -EINVAL;
+
+	gsp->internal.client.object.client = &gsp->internal.client;
+	gsp->internal.client.object.parent = NULL;
+	gsp->internal.client.object.handle = st->client;
+	gsp->internal.client.gsp = gsp;
+	INIT_LIST_HEAD(&gsp->internal.client.events);
+
+	gsp->internal.device.object.client = &gsp->internal.client;
+	gsp->internal.device.object.parent = &gsp->internal.client.object;
+	gsp->internal.device.object.handle = st->device;
+
+	gsp->internal.device.subdevice.client = &gsp->internal.client;
+	gsp->internal.device.subdevice.parent = &gsp->internal.device.object;
+	gsp->internal.device.subdevice.handle = st->subdevice;
+
+	gsp->bar.rm_bar1_pdb = st->bar1_pdb;
+	gsp->bar.rm_bar2_pdb = st->bar2_pdb;
+
+	gsp->fb.region_nr = 0;
+	for (u32 i = 0; i < st->region_count; i++) {
+		u64 base = st->regions[i].base;
+		u64 limit = st->regions[i].limit;
+		u64 reserved = st->regions[i].reserved;
+
+		if (reserved)
+			continue;
+		if (gsp->fb.region_nr >= ARRAY_SIZE(gsp->fb.region))
+			return -ENOSPC;
+		gsp->fb.region[gsp->fb.region_nr].addr = base;
+		gsp->fb.region[gsp->fb.region_nr].size = (limit + 1) - base;
+		gsp->fb.region_nr++;
+	}
+	if (!gsp->fb.region_nr)
+		return -ENOENT;
+
+	return 0;
+}
+
+static int
+r535_gsp_hybrid_gsp_init(struct nvkm_gsp *gsp);
+
 int
 r535_gsp_init(struct nvkm_gsp *gsp)
 {
@@ -1792,13 +2035,44 @@ r535_gsp_init(struct nvkm_gsp *gsp)
 	if (WARN_ON(!nvkm_falcon_riscv_active(&gsp->falcon)))
 		return -EIO;
 
-	ret = r535_gsp_rpc_poll(gsp, NV_VGPU_MSG_EVENT_GSP_INIT_DONE);
-	if (ret)
+	/* Public 615 bootstrap links RX before GMCAPI GSP_INIT. This
+	 * experiment cannot use r535/r570 postinit or runtime framing.
+	 */
+	if (r535_gsp_hybrid615(gsp)) {
+		ret = r535_gsp_hybrid_gsp_init(gsp);
+		if (ret) {
+			r535_gsp_init_debug_dump(gsp);
+			goto done;
+		}
+		ret = r535_gsp_hybrid_static_info(gsp);
+		if (ret) {
+			r535_gsp_init_debug_dump(gsp);
+			goto done;
+		}
+		nvkm_info(&gsp->subdev,
+			  "c10: diagnostic reached static info; runtime requires native r615\n");
+		ret = -EOPNOTSUPP;
 		goto done;
+	}
+
+	ret = r535_gsp_rpc_poll(gsp, NV_VGPU_MSG_EVENT_GSP_INIT_DONE);
+	if (ret) {
+		r535_gsp_init_debug_dump(gsp);
+		goto done;
+	}
 
 	gsp->running = true;
 
 done:
+	if (ret && r535_gsp_hybrid615(gsp)) {
+		int stopped = gsp->func->reset(gsp);
+
+		if (stopped) {
+			gsp->hybrid615.quarantined = true;
+			nvkm_error(&gsp->subdev,
+				   "c10: reset failed (%d), retaining exposed DMA\n", stopped);
+		}
+	}
 	if (gsp->sr.meta.data) {
 		gsp->rm->api->fbsr->resume(gsp);
 
@@ -1849,6 +2123,359 @@ static const struct nvkm_firmware_func
 r535_gsp_fw = {
 	.type = NVKM_FIRMWARE_IMG_SGT,
 };
+
+/* Hybrid 615 RMARGS payload: new GSP_ARGUMENTS_CACHED layout (magic, queue
+ * args, dmem-stack flag) plus the mandatory 615 ucodes bindata, built with
+ * the same proven allocators as the 570 path (mem_ctor, firmware_ctor,
+ * radix3_sg). Only the RMARGS page content is new; queue memory, logs,
+ * WPR layout and boot flow are untouched.
+ */
+static int
+r535_gsp_hybrid_rmargs_init(struct nvkm_gsp *gsp)
+{
+	const struct firmware *ucodes = NULL;
+	struct r615_boot_config config = { 0 };
+	struct r615_init_args *args;
+	int ret;
+
+	ret = nvkm_gsp_load_fw(gsp, "ucodes", gsp->rm->version, &ucodes);
+	if (ret)
+		return ret;
+	ret = nvkm_firmware_ctor(&r535_gsp_fw, "gsp-ucodes",
+				 gsp->subdev.device, ucodes->data, ucodes->size,
+				 &gsp->hybrid615.fw);
+	nvkm_firmware_put(ucodes);
+	if (ret)
+		return ret;
+	ret = nvkm_gsp_radix3_sg(gsp, &gsp->hybrid615.fw.mem.sgt,
+				 gsp->hybrid615.fw.len, &gsp->hybrid615.radix3);
+	if (ret)
+		goto dtor_fw;
+	ret = nvkm_gsp_mem_ctor(gsp, 0x1000, &gsp->hybrid615.rmargs);
+	if (ret)
+		goto dtor_radix3;
+	config.queue.flags = 0;
+	config.queue.shared_mem_pa = gsp->shm.mem.addr;
+	config.queue.cmd_offset =
+		(u8 *)gsp->shm.cmdq.ptr - (u8 *)gsp->shm.mem.data;
+	config.queue.status_offset =
+		(u8 *)gsp->shm.msgq.ptr - (u8 *)gsp->shm.mem.data;
+	config.queue.element_header_bytes = 24;
+	config.queue.element_min_bytes = GSP_PAGE_SIZE;
+	config.queue.element_max_bytes = 16U * GSP_PAGE_SIZE;
+	config.queue.header_alignment_log2 = 4;
+	config.queue.element_alignment_log2 = GSP_PAGE_SHIFT;
+	config.queue.pte_count = gsp->shm.ptes.nr;
+	config.shared_mem_bytes = gsp->shm.ptes.size +
+				  gsp->shm.cmdq.size +
+				  gsp->shm.msgq.size;
+	config.dmem_stack = true;
+	args = gsp->hybrid615.rmargs.data;
+	ret = r615_build_init_args(&config, args);
+	if (ret)
+		goto dtor_rmargs;
+	/* Public 615 kgspAllocRmStateMonitorBuffer and RMARGS producer.
+	 * LOGRMON is a log queue and must not alias this state buffer.
+	 */
+	ret = nvkm_gsp_mem_ctor(gsp, R615_STATE_MONITOR_BYTES,
+				&gsp->hybrid615.state_monitor);
+	if (ret)
+		goto dtor_rmargs;
+	memset(gsp->hybrid615.state_monitor.data, 0, R615_STATE_MONITOR_BYTES);
+	gsp->hybrid615.queue = kzalloc(sizeof(*gsp->hybrid615.queue), GFP_KERNEL);
+	if (!gsp->hybrid615.queue) {
+		ret = -ENOMEM;
+		goto dtor_monitor;
+	}
+	/* Only prepare before Booter: prepare clears shared DMA memory. */
+	ret = r615_msgq_prepare(gsp->hybrid615.queue, gsp->rm->version,
+				gsp->shm.mem.data, gsp->shm.mem.size, gsp->shm.mem.addr,
+				&r535_gsp_hybrid_msgq_ops, gsp, args);
+	if (ret)
+		goto dtor_queue;
+	args->bindata.address = gsp->hybrid615.radix3.lvl0.addr;
+	args->bindata.size = gsp->hybrid615.fw.len;
+	args->state_monitor.address = gsp->hybrid615.state_monitor.addr;
+	args->state_monitor.size = gsp->hybrid615.state_monitor.size;
+	ret = r615_msgq_start(gsp->hybrid615.queue);
+	if (ret)
+		goto dtor_queue;
+	gsp->cmdq.wptr = &gsp->hybrid615.cmd_wptr;
+	gsp->cmdq.rptr = &gsp->hybrid615.cmd_rptr;
+	gsp->hybrid615.enabled = true;
+	return 0;
+
+dtor_queue:
+	kfree(gsp->hybrid615.queue);
+	gsp->hybrid615.queue = NULL;
+dtor_monitor:
+	nvkm_gsp_mem_dtor(&gsp->hybrid615.state_monitor);
+dtor_rmargs:
+	nvkm_gsp_mem_dtor(&gsp->hybrid615.rmargs);
+dtor_radix3:
+	nvkm_gsp_radix3_dtor(gsp, &gsp->hybrid615.radix3);
+dtor_fw:
+	nvkm_firmware_dtor(&gsp->hybrid615.fw);
+	return ret;
+}
+
+static void
+r535_gsp_hybrid_dtor(struct nvkm_gsp *gsp)
+{
+	if (!gsp->hybrid615.enabled)
+		return;
+	nvkm_gsp_radix3_dtor(gsp, &gsp->hybrid615.radix3);
+	nvkm_firmware_dtor(&gsp->hybrid615.fw);
+	nvkm_gsp_mem_dtor(&gsp->hybrid615.rmargs);
+	nvkm_gsp_mem_dtor(&gsp->hybrid615.state_monitor);
+	kfree(gsp->hybrid615.queue);
+	gsp->hybrid615.queue = NULL;
+	gsp->hybrid615.enabled = false;
+	/* Extra log descriptors are freed later, after logging retention. */
+}
+
+/* Hybrid 615: MSGQ 2.0 MMIO operations over the existing shared memory
+ * (gsp->shm.mem). The register map is shared with the r535 legacy path
+ * (hybrid615.h); only GMCAPI GSP_INIT uses it pre-INIT_DONE.
+ */
+static const u32
+r535_gsp_hybrid_msgq_registers[] = {
+	[R615_MSGQ_TX_HEAD] = HYBRID615_MSGQ_TX_HEAD,
+	[R615_MSGQ_TX_TAIL] = HYBRID615_MSGQ_TX_TAIL,
+	[R615_MSGQ_RX_HEAD] = HYBRID615_MSGQ_RX_HEAD,
+	[R615_MSGQ_RX_TAIL] = HYBRID615_MSGQ_RX_TAIL,
+};
+
+static int
+r535_gsp_hybrid_msgq_read(void *context, enum r615_msgq_register reg, u32 *value)
+{
+	struct nvkm_gsp *gsp = context;
+
+	if (!gsp || !value ||
+	    (reg != R615_MSGQ_TX_TAIL && reg != R615_MSGQ_RX_HEAD))
+		return -EINVAL;
+	*value = nvkm_rd32(gsp->subdev.device,
+			   r535_gsp_hybrid_msgq_registers[reg]);
+	return 0;
+}
+
+static int
+r535_gsp_hybrid_msgq_write(void *context, enum r615_msgq_register reg, u32 value)
+{
+	struct nvkm_gsp *gsp = context;
+
+	if (!gsp ||
+	    (reg != R615_MSGQ_TX_HEAD && reg != R615_MSGQ_RX_TAIL))
+		return -EINVAL;
+	nvkm_wr32(gsp->subdev.device,
+		  r535_gsp_hybrid_msgq_registers[reg], value);
+	return 0;
+}
+
+static void
+r535_gsp_hybrid_msgq_acquire(void *context)
+{
+	dma_rmb();
+}
+
+static void
+r535_gsp_hybrid_msgq_publish(void *context)
+{
+	dma_mb();
+}
+
+static const struct r615_msgq_ops
+r535_gsp_hybrid_msgq_ops = {
+	.read = r535_gsp_hybrid_msgq_read,
+	.write = r535_gsp_hybrid_msgq_write,
+	.acquire = r535_gsp_hybrid_msgq_acquire,
+	.publish = r535_gsp_hybrid_msgq_publish,
+};
+
+/* Hybrid 615: GMCAPI GSP_INIT handshake over MSGQ 2.0 shared memory.
+ *
+ * Public 615 kgspBootstrap_TU102 links the status queue before GSP_INIT.
+ * An empty status header does not establish a missing-handshake diagnosis.
+ *
+ * Returns 0 with gsp->r615_sysinfo / r615_static filled; caller then uses
+ * r615 get_static_info to consume the decoded static info.
+ */
+static int
+r535_gsp_hybrid_gsp_init(struct nvkm_gsp *gsp)
+{
+	struct nvkm_device *device = gsp->subdev.device;
+	struct r615_msgq *msgq = gsp->hybrid615.queue;
+	struct r615_message req = { 0 }, rep = { 0 };
+	struct r615_sysinfo si = { 0 };
+	struct r615_static *st = NULL;
+	struct pci_dev *pdev;
+	u64 *si_words = NULL, *static_words = NULL;
+	void *stage = NULL;
+	u32 si_count = 0, static_count = 0;
+	unsigned long deadline;
+	int ret, i;
+
+	if (!msgq || !msgq->tx_started || !gsp->shm.mem.data ||
+	    gsp->shm.mem.size != R615_MSGQ_SHARED_BYTES)
+		return -EINVAL;
+
+	/* Link RX: poll until the GSP publishes its status-queue header.
+	 * Snapshot state periodically so a stuck RM is visible in the log.
+	 */
+	deadline = jiffies + msecs_to_jiffies(30000);
+	for (i = 0; i < 6; i++) {
+		unsigned long slice = jiffies + msecs_to_jiffies(5000);
+
+		do {
+			ret = r615_msgq_link_rx(msgq);
+			if (ret != -EAGAIN)
+				break;
+			msleep(1);
+		} while (time_before(jiffies, slice) &&
+			 time_before(jiffies, deadline));
+		if (ret != -EAGAIN)
+			break;
+		nvkm_info(&gsp->subdev,
+			  "c10: still waiting for status queue (%ds)\n",
+			  5 * (i + 1));
+		r535_gsp_init_debug_dump(gsp);
+		if (time_after_eq(jiffies, deadline))
+			break;
+	}
+	if (ret == -EAGAIN) {
+		nvkm_info(&gsp->subdev,
+			  "c10: status queue link timed out\n");
+		return -ETIMEDOUT;
+	}
+	if (ret) {
+		nvkm_error(&gsp->subdev,
+			   "c10: msgq link_rx failed (%d)\n", ret);
+		return ret;
+	}
+	nvkm_info(&gsp->subdev, "c10: status queue linked\n");
+
+	/* Build NVKV sysinfo for the GMCAPI GSP_INIT payload. */
+	pdev = container_of(device, struct nvkm_device_pci, device)->pdev;
+	si.pci_device = (pdev->device << 16) | pdev->vendor;
+	si.pci_sub = (pdev->subsystem_device << 16) | pdev->subsystem_vendor;
+	si.pci_rev = pdev->revision;
+	si.phys_bar0 = device->func->resource_addr(device, NVKM_BAR0_PRI);
+	si.phys_fb = device->func->resource_addr(device, NVKM_BAR1_FB);
+	si.phys_inst = device->func->resource_addr(device, NVKM_BAR2_INST);
+	si.domain_bdf = pci_dev_id(pdev);
+	si.cfg_base = device->pci->func->cfg.addr;
+	si.cfg_size = device->pci->func->cfg.size;
+	si.primary = video_is_primary_device(device->dev);
+	si.console_mem = 0;
+	si.max_user_va = TASK_SIZE;
+
+	si_words = kvcalloc(R615_SYSINFO_MAX_WORDS, sizeof(u64), GFP_KERNEL);
+	if (!si_words)
+		return -ENOMEM;
+	ret = r615_sysinfo_encode(&si, si_words, R615_SYSINFO_MAX_WORDS,
+				  &si_count);
+	if (ret) {
+		kvfree(si_words);
+		return ret;
+	}
+
+	stage = kvzalloc(R615_MESSAGE_MAX_BYTES, GFP_KERNEL);
+	static_words = kvcalloc(R615_GMCAPI_MAX_STATIC_WORDS,
+				sizeof(u64), GFP_KERNEL);
+	if (!stage || !static_words) {
+		kvfree(si_words);
+		kvfree(stage);
+		kvfree(static_words);
+		return -ENOMEM;
+	}
+
+	/* Send GMCAPI GSP_INIT (command 0x010001) with NVKV sysinfo. */
+	req.type = R615_MESSAGE_GMCAPI;
+	req.function = R615_GMCAPI_GSP_INIT;
+	req.sequence = 1;
+	req.status_or_limit = R615_GMCAPI_MAX_STATIC_WORDS * sizeof(u64);
+	req.data = si_words;
+	req.bytes = si_count * sizeof(u64);
+
+	ret = r615_message_send(msgq, &req, stage, R615_MESSAGE_MAX_BYTES);
+	if (ret) {
+		nvkm_error(&gsp->subdev,
+			   "c10: GMCAPI GSP_INIT send failed (%d)\n", ret);
+		goto out;
+	}
+
+	/* Receive the GMCAPI GSP_INIT reply carrying static_info NVKV. */
+	deadline = jiffies + msecs_to_jiffies(10000);
+	do {
+		ret = r615_message_receive(msgq, stage, R615_MESSAGE_MAX_BYTES, &rep);
+		if (ret != -EAGAIN)
+			break;
+		msleep(1);
+	} while (time_before(jiffies, deadline));
+	if (ret == -EAGAIN)
+		ret = -ETIMEDOUT;
+	if (ret) {
+		nvkm_error(&gsp->subdev,
+			   "c10: GMCAPI GSP_INIT receive failed (%d)\n", ret);
+		goto out;
+	}
+
+	if (rep.type != R615_MESSAGE_GMCAPI ||
+	    rep.function != R615_GMCAPI_GSP_INIT ||
+	    rep.sequence != req.sequence || !rep.response ||
+	    rep.status_or_limit) {
+		nvkm_error(&gsp->subdev,
+			   "c10: GMCAPI GSP_INIT reply protocol error "
+			   "type=%u fn=%u seq=%llu resp=%u status=%u\n",
+			   rep.type, rep.function,
+			   (unsigned long long)rep.sequence,
+			   rep.response, rep.status_or_limit);
+		ret = -EPROTO;
+		goto out;
+	}
+
+	if (rep.bytes > R615_GMCAPI_MAX_STATIC_WORDS * sizeof(u64) ||
+	    rep.bytes % sizeof(u64)) {
+		ret = -EPROTO;
+		goto out;
+	}
+	memcpy(static_words, rep.data, rep.bytes);
+	static_count = rep.bytes / sizeof(u64);
+
+	st = kzalloc(sizeof(*st), GFP_KERNEL);
+	if (!st) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	ret = r615_static_decode(static_words, static_count, st);
+	if (ret) {
+		nvkm_error(&gsp->subdev,
+			   "c10: static info decode failed (%d)\n", ret);
+		kfree(st);
+		st = NULL;
+		goto out;
+	}
+
+	/* Publish decoded results for r615 get_static_info / postinit. */
+	gsp->r615_sysinfo = si_words;
+	gsp->r615_sysinfo_count = si_count;
+	gsp->r615_static_words = static_words;
+	gsp->r615_static_count = static_count;
+	gsp->r615_static = st;
+	si_words = NULL;
+	static_words = NULL;
+	st = NULL;
+
+	nvkm_info(&gsp->subdev, "c10: GMCAPI GSP_INIT ok, static decoded\n");
+	ret = 0;
+
+out:
+	kvfree(si_words);
+	kvfree(stage);
+	kvfree(static_words);
+	kfree(st);
+	return ret;
+}
 
 static int
 r535_gsp_elf_section(struct nvkm_gsp *gsp, const char *name, const u8 **pdata, u64 *psize)
@@ -2093,6 +2720,10 @@ r535_gsp_libos_debugfs_fini(struct nvkm_gsp __maybe_unused *gsp)
 void
 r535_gsp_dtor(struct nvkm_gsp *gsp)
 {
+	if (gsp->hybrid615.quarantined) {
+		nvkm_error(&gsp->subdev, "c10: boot DMA quarantined after failed reset\n");
+		return;
+	}
 	idr_destroy(&gsp->client_id.idr);
 	mutex_destroy(&gsp->client_id.mutex);
 
@@ -2116,14 +2747,27 @@ r535_gsp_dtor(struct nvkm_gsp *gsp)
 	nvkm_gsp_fwsec_sb_dtor(gsp);
 
 	nvkm_gsp_mem_dtor(&gsp->rmargs);
+	r535_gsp_hybrid_dtor(gsp);
 	nvkm_gsp_mem_dtor(&gsp->wpr_meta);
 	nvkm_gsp_mem_dtor(&gsp->shm.mem);
+
+	kvfree(gsp->r615_static_words);
+	kfree(gsp->r615_static);
+	kvfree(gsp->r615_sysinfo);
+	gsp->r615_static = NULL;
+	gsp->r615_static_words = NULL;
+	gsp->r615_sysinfo = NULL;
+	gsp->r615_static_count = 0;
+	gsp->r615_sysinfo_count = 0;
 
 	r535_gsp_libos_debugfs_fini(gsp);
 
 	nvkm_gsp_mem_dtor(&gsp->loginit);
 	nvkm_gsp_mem_dtor(&gsp->logintr);
 	nvkm_gsp_mem_dtor(&gsp->logrm);
+	/* Hybrid 615 extra logs; mem_dtor is a no-op on never-allocated slots. */
+	for (unsigned i = 0; i < ARRAY_SIZE(gsp->hybrid615.logs); i++)
+		nvkm_gsp_mem_dtor(&gsp->hybrid615.logs[i]);
 }
 
 static void
@@ -2194,13 +2838,22 @@ r535_gsp_oneinit(struct nvkm_gsp *gsp)
 	if (WARN_ON(ret))
 		return ret;
 
-	ret = rmapi->gsp->set_system_info(gsp);
-	if (WARN_ON(ret))
-		return ret;
+	/* Hybrid 615: the RM does not process the legacy VGPU
+	 * GSP_SET_SYSTEM_INFO RPC before the GMCAPI GSP_INIT handshake.
+	 * Sysinfo is encoded and delivered via GMCAPI GSP_INIT in
+	 * r535_gsp_hybrid_gsp_init() instead; skip the legacy call here.
+	 */
+	if (!r535_gsp_hybrid615(gsp)) {
+		ret = rmapi->gsp->set_system_info(gsp);
+		if (WARN_ON(ret))
+			return ret;
+	}
 
-	ret = r535_gsp_rpc_set_registry(gsp);
-	if (WARN_ON(ret))
-		return ret;
+	if (!r535_gsp_hybrid615(gsp)) {
+		ret = r535_gsp_rpc_set_registry(gsp);
+		if (WARN_ON(ret))
+			return ret;
+	}
 
 	mutex_init(&gsp->client_id.mutex);
 	idr_init(&gsp->client_id.idr);

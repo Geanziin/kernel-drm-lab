@@ -1133,9 +1133,23 @@ nouveau_bo_vm_cleanup(struct ttm_buffer_object *bo,
 
 	ret = dma_resv_get_singleton(bo->base.resv, DMA_RESV_USAGE_WRITE,
 				     &fence);
-	if (ret)
-		dma_resv_wait_timeout(bo->base.resv, DMA_RESV_USAGE_WRITE,
-				      false, MAX_SCHEDULE_TIMEOUT);
+	if (ret) {
+		/*
+		 * Waiting for write fences here used MAX_SCHEDULE_TIMEOUT,
+		 * which hangs the whole system in D state whenever a GSP-RM
+		 * robust-channel event (type 69) leaves the engine wedged and
+		 * a fence never signals.  Bound the wait so TTM can make
+		 * forward progress; the buffer may be stale but the box stays
+		 * alive.
+		 */
+		long remaining;
+
+		remaining = dma_resv_wait_timeout(bo->base.resv,
+						 DMA_RESV_USAGE_WRITE,
+						 false, 15 * HZ);
+		if (remaining <= 0)
+			NV_WARN(drm, "vm cleanup: write fence didn't signal in 15s, continuing\n");
+	}
 
 	nv10_bo_put_tile_region(dev, *old_tile, fence);
 	*old_tile = new_tile;

@@ -1090,23 +1090,38 @@ r535_dp_aux_xfer(struct nvkm_outp *outp, u8 type, u32 addr, u8 *data, u8 *psize)
 		memcpy(ctrl->data, data, size);
 
 		ret = nvkm_gsp_rm_ctrl_push(&disp->rm.objcom, &ctrl, sizeof(*ctrl));
-		if ((ret == -EAGAIN || ret == -EBUSY) && ctrl->retryTimeMs) {
+		if (ret) {
+			u32 wait = ctrl->retryTimeMs;
+
+			nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+			if (wait) {
+				/*
+				 * Device (likely an eDP panel) isn't ready yet, wait for the time specified
+				 * by GSP before retrying again
+				 */
+				nvkm_debug(&disp->engine.subdev,
+					   "Waiting %dms for GSP LT panel delay before retrying in AUX\n",
+					   wait);
+				msleep(wait);
+				continue;
+			}
 			/*
-			 * Device (likely an eDP panel) isn't ready yet, wait for the time specified
-			 * by GSP before retrying again
+			 * GSP-RM refused the AUX control (NV_ERR_GENERIC).
+			 * Never fabricate a reply: just keep retrying within
+			 * the bounded loop above and let the caller
+			 * (drm_dp_helper) retry the transfer.  Do not disable
+			 * AUX for the rest of the boot, otherwise EDID read /
+			 * modesetting never completes and there is no video
+			 * output.
 			 */
-			nvkm_debug(&disp->engine.subdev,
-				   "Waiting %dms for GSP LT panel delay before retrying in AUX\n",
-				   ctrl->retryTimeMs);
-			msleep(ctrl->retryTimeMs);
-			nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
-		} else {
-			memcpy(data, ctrl->data, size);
-			*psize = ctrl->size;
-			ret = ctrl->replyType;
-			nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
-			break;
+			continue;
 		}
+
+		memcpy(data, ctrl->data, size);
+		*psize = ctrl->size;
+		ret = ctrl->replyType;
+		nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+		break;
 	}
 	return ret;
 }

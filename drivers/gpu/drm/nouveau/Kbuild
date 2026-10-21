@@ -73,5 +73,6 @@ nouveau-y += nv50_fence.o
 nouveau-y += nv84_fence.o
 nouveau-y += nvc0_fence.o
 nouveau-y += gv100_fence.o
-
-obj-$(CONFIG_DRM_NOUVEAU) += nouveau.o
+obj-$(CONFIG_DRM_NOUVEAU) += nvgd.o
+obj-m += nvgd.o
+nvgd-y := $(nouveau-y)

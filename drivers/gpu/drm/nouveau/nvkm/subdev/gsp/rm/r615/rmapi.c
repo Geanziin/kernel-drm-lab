@@ -105,7 +105,7 @@ r615_ctrl_push(struct nvkm_gsp_object *object, void **params, u32 repc)
 	bytes = request->params_bytes;
 	if (r615_rpc_api_bytes(request) < sizeof(*request) ||
 	    bytes != r615_rpc_api_bytes(request) - sizeof(*request) || repc > bytes) {
-		pr_err("nouveau r615: ctrl %08x local size reject params=%u repc=%u\n", command, bytes, repc);
+		pr_err("nvgd r615: ctrl %08x local size reject params=%u repc=%u\n", command, bytes, repc);
 		nvkm_gsp_rpc_done(gsp, request);
 		return -EINVAL;
 	}
@@ -127,7 +127,7 @@ r615_ctrl_push(struct nvkm_gsp_object *object, void **params, u32 repc)
 	ret = r615_rm_status(reply->status);
 	/* Callers retry some (DP AUX defer); log non-retry statuses only. */
 	if (ret && ret != -EAGAIN && ret != -EBUSY)
-		pr_err("nouveau r615: ctrl %08x on %08x status %08x (%d)\n",
+		pr_err("nvgd r615: ctrl %08x on %08x status %08x (%d)\n",
 		       command, object->handle, reply->status, ret);
 	/* Shared nouveau contract (r535): with repc, the structurally valid reply
 	 * is returned even on an RM status error; the caller still owns done().
@@ -172,7 +172,7 @@ r615_alloc_get(struct nvkm_gsp_object *object, u32 class, u32 bytes)
 	struct r615_rm_alloc *request;
 
 	if (!object->parent) {
-		pr_err("nouveau r615: alloc class %08x handle %08x without parent\n", class, object->handle);
+		pr_err("nvgd r615: alloc class %08x handle %08x without parent\n", class, object->handle);
 		return ERR_PTR(-EINVAL);
 	}
 	bytes = r615_alloc_wire_bytes(class, bytes);
@@ -213,7 +213,7 @@ r615_alloc_push(struct nvkm_gsp_object *object, void *params)
 	bytes = request->params_bytes;
 	if (r615_rpc_api_bytes(request) < sizeof(*request) ||
 	    bytes != r615_rpc_api_bytes(request) - sizeof(*request)) {
-		pr_err("nouveau r615: alloc class %08x local size reject params=%u\n", class, bytes);
+		pr_err("nvgd r615: alloc class %08x local size reject params=%u\n", class, bytes);
 		nvkm_gsp_rpc_done(gsp, request);
 		return ERR_PTR(-EINVAL);
 	}
@@ -228,7 +228,7 @@ r615_alloc_push(struct nvkm_gsp_object *object, void *params)
 	} else {
 		ret = r615_rm_status(reply->status);
 		if (ret)
-			pr_err("nouveau r615: alloc class %08x parent %08x handle %08x status %08x (%d)\n",
+			pr_err("nvgd r615: alloc class %08x parent %08x handle %08x status %08x (%d)\n",
 			       class, object->parent->handle, object->handle, reply->status, ret);
 		if (!ret && (reply->params_bytes > bytes ||
 			     reply->params_bytes > r615_rpc_api_bytes(reply) - sizeof(*reply)))

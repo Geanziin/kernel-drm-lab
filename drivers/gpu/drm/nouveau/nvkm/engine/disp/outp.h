@@ -43,6 +43,11 @@ struct nvkm_outp {
 			bool enabled;
 			bool aux_pwr;
 			bool aux_pwr_pu;
+			/* GSP-RM (the display owner on Turing+) refused the DP AUX
+			 * control for this output: stop issuing it and never hand a
+			 * fabricated reply to drm_dp_helper.
+			 */
+			bool aux_unsupported;
 			u8 lttpr[6];
 			u8 lttprs;
 			u8 dpcd[DP_RECEIVER_CAP_SIZE];

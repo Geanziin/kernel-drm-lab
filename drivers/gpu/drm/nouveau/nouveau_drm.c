@@ -1442,7 +1442,7 @@ static const struct dev_pm_ops nouveau_pm_ops = {
 
 static struct pci_driver
 nouveau_drm_pci_driver = {
-	.name = "nouveau",
+	.name = DRIVER_NAME,
 	.id_table = nouveau_drm_pci_table,
 	.probe = nouveau_drm_probe,
 	.remove = nouveau_drm_remove,

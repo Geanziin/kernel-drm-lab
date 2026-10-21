@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 /* Native 615 queue IRQ, deferred notification delivery and interrupt map. */
 #include <linux/interrupt.h>
+#include <linux/minmax.h>
+#include <linux/module.h>
+#include <linux/printk.h>
 #include <linux/slab.h>
 #include <core/device.h>
 #include <core/gpuobj.h>
+#include <engine/fifo/cgrp.h>
 #include <engine/fifo/chan.h>
+#include <engine/fifo/runl.h>
 #include <subdev/vfn.h>
 #include <rm/rm.h>
 #include "message.h"
@@ -34,7 +39,46 @@ struct r615_runtime {
 	/* Public-enum events with no nouveau consumer: counted, first one logged. */
 	u64 dropped, dropped_seen;
 	bool stopped, registered, started, lockdown, pm_paused, mmu_queued;
+	/* RC (robust channel) diagnostics.  The policy decides whether an event
+	 * only updates these counters or also tears the affected group down.
+	 */
+	u64 rc_events, rc_logged, rc_actions;
+	u32 rc_policy_seen;
 };
+
+/* Public 615 g_kernel_rc_nvoc.h: RC_NOTIFIER_SCOPE_CHANNEL/TSG.  A TSG-scoped
+ * notification is about the whole channel group, not the single channel named
+ * by chid, so the host cannot disable one arbitrary channel for it.
+ */
+#define R615_RC_SCOPE_CHANNEL 0U
+#define R615_RC_SCOPE_TSG     1U
+/* Full-detail RC logs before the summary-only rate limit kicks in. */
+#define R615_RC_LOG_BUDGET    8U
+
+/* Host action on R615_EVENT_RC:
+ *   0 = diagnose only.  GSP-RM contains the fault before notifying the host,
+ *       but a halted channel never signals its pending fences, so userspace
+ *       waits forever on them.
+ *   1 = upstream nouveau parity: disable the single channel named by chid.
+ *   2 = channel-group recovery (default): run nouveau's runlist/TSG RC
+ *       recovery (block runlist, disable group channels, reset the engine
+ *       that was running the group).  Needed for TSG-scoped GR errors, where
+ *       disabling one channel leaves the rest of the group wedged.
+ */
+static uint r615_rc_policy = 2;
+module_param_named(rc_policy, r615_rc_policy, uint, 0644);
+MODULE_PARM_DESC(rc_policy,
+		 "GSP-RM robust-channel host action: 0=diagnose only, 1=disable channel by chid, 2=channel-group recovery (default 2)");
+
+/* Bytes of the RM fault journal to hex-dump on the first RC event of the boot.
+ * The journal is where RM records what the engine was doing (9816 bytes in the
+ * boot that took Xwayland's channel down), so it is the primary evidence when
+ * chasing the producer of a GR exception.
+ */
+static uint r615_rc_journal_bytes = 16384;
+module_param_named(rc_journal_bytes, r615_rc_journal_bytes, uint, 0644);
+MODULE_PARM_DESC(rc_journal_bytes,
+		 "GSP-RM fault journal bytes to dump on the first robust-channel event (default 16384, max 16384)");
 
 /* Public 615 rpc_global_enums.h: FIRST_EVENT 0x1000 < event < NUM_EVENTS 0x102e. */
 #define R615_EVENT_PUBLIC_FIRST 0x1000U
@@ -76,18 +120,58 @@ r615_runtime_post(struct nvkm_gsp *gsp, const void *data, u32 bytes)
 	return ret;
 }
 
+/* The RC notification names an RM engine type.  The channel group of the
+ * reported channel must own a context for that engine, otherwise the event is
+ * about a different channel and this one must not be touched.
+ */
+static bool
+r615_rc_cgrp_has_engine(struct nvkm_gsp *gsp, struct nvkm_cgrp *cgrp, u32 engine,
+			const char **name)
+{
+	const struct nvkm_rm_api_fifo *api = gsp->rm ? gsp->rm->api->fifo : NULL;
+	enum nvkm_subdev_type type;
+	struct nvkm_ectx *ectx;
+	int inst, p2080;
+
+	if (name)
+		*name = NULL;
+	if (!api || !api->xlat_rm_engine_type)
+		return false;
+	inst = api->xlat_rm_engine_type(engine, &type, &p2080);
+	if (inst < 0)
+		return false;
+
+	list_for_each_entry(ectx, &cgrp->ectxs, head) {
+		if (ectx->engn->engine->subdev.type != type ||
+		    ectx->engn->engine->subdev.inst != inst)
+			continue;
+		if (name)
+			*name = ectx->engn->engine->subdev.name;
+		return true;
+	}
+	return false;
+}
+
 static int
 r615_runtime_rc(struct nvkm_gsp *gsp, const struct r615_rc_event *message)
 {
+	struct r615_runtime *runtime = gsp->r615_runtime;
 	struct nvkm_fifo *fifo = gsp->subdev.device->fifo;
-	struct nvkm_chan *channel;
-	unsigned long flags;
+	struct nvkm_chan *channel = NULL;
+	struct nvkm_cgrp *cgrp = NULL;
+	const char *engine_name = NULL;
+	unsigned long flags = 0;
+	bool attributed = false;
+	u32 policy = READ_ONCE(r615_rc_policy);
+	u64 event = 0;
 	int ret = 0;
 
 	if (!fifo)
 		return -ENODEV;
-	nvkm_error(&gsp->subdev, "r615: RC engine=%u channel=%u type=%u scope=%u partition=%u\n",
-		   message->engine, message->chid, message->type, message->scope, message->partition);
+
+	/* The channel is the only host object the event can map to: chid form, or
+	 * instance form checked against the aperture of the instance block.
+	 */
 	if (!message->info_type) {
 		channel = nvkm_chan_get_chid(&fifo->engine, message->chid, &flags);
 	} else {
@@ -112,10 +196,69 @@ r615_runtime_rc(struct nvkm_gsp *gsp, const struct r615_rc_event *message)
 				ret = -EPROTO;
 		}
 	}
-	if (!channel)
-		return -ENOENT;
-	if (!ret)
+
+	if (channel)
+		cgrp = nvkm_cgrp_ref(channel->cgrp);
+	if (cgrp)
+		attributed = r615_rc_cgrp_has_engine(gsp, cgrp, message->engine,
+						    &engine_name);
+
+	if (runtime)
+		event = ++runtime->rc_events;
+
+	/* Rate limit: full detail for the first events, then a periodic summary,
+	 * so a looping fault cannot flood the console while the counters keep the
+	 * record.  The journal carries RM's own trace of the faulting context.
+	 */
+	if (runtime && runtime->rc_logged < R615_RC_LOG_BUDGET) {
+		runtime->rc_logged++;
+		nvkm_error(&gsp->subdev,
+			   "r615: RC engn=%08x(%s) chid=%u cgrp=%s scope=%u level=%u type=%u gfid=%u part=%u fault=%08x%08x/%08x ap=%u cb=%u journal=%u policy=%u matched=%u\n",
+			   message->engine, engine_name ? engine_name : "?",
+			   message->chid, cgrp ? cgrp->name : "-",
+			   message->scope, message->level, message->type, message->gfid,
+			   message->partition, message->fault_hi, message->fault_lo,
+			   message->fault_type, message->aperture, message->callback_needed,
+			   message->journal_bytes, policy, attributed);
+		if (message->journal_bytes && runtime->rc_logged <= R615_RC_LOG_BUDGET)
+			print_hex_dump(KERN_INFO, "nvgd r615: rc journal ", DUMP_PREFIX_OFFSET,
+				       16, 1, message->journal,
+				       min_t(u32, message->journal_bytes,
+					     min_t(u32, READ_ONCE(r615_rc_journal_bytes), 16384)),
+				       false);
+	} else if (runtime && !(event % 256)) {
+		nvkm_warn(&gsp->subdev,
+			  "r615: RC events=%llu (host actions=%llu) chid=%u type=%u scope=%u\n",
+			  event, runtime->rc_actions, message->chid, message->type,
+			  message->scope);
+	}
+
+	if (ret) {
+		/* Instance/aperture disagreement: never act on a channel the event
+		 * may not be about.
+		 */
+		goto out;
+	}
+	if (!policy || !message->callback_needed || !channel || !cgrp)
+		goto out;
+	if (!attributed) {
+		nvkm_warn(&gsp->subdev,
+			  "r615: RC chid=%u not attributed to engn=%08x, host stays out\n",
+			  message->chid, message->engine);
+		goto out;
+	}
+
+	if (policy == 1 || message->scope == R615_RC_SCOPE_CHANNEL) {
 		nvkm_chan_error(channel, false);
+	} else {
+		/* TSG scope: the whole channel group is the recovery unit. */
+		nvkm_runl_rc_cgrp(cgrp);
+	}
+	if (runtime)
+		runtime->rc_actions++;
+
+out:
+	nvkm_cgrp_unref(&cgrp);
 	nvkm_chan_put(&channel, flags);
 	return ret;
 }

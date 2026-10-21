@@ -200,11 +200,14 @@ r535_gr_get_ctxbuf_info(struct r535_gr *gr, int i,
 #define _B(N,G,I,R) _A(GRAPHICS_##N, N, (G), (I), (R))
 		/*                                       global   init     ro */
 		_A(           GRAPHICS,             MAIN, false,  true, false),
+		_A(          GRAPHICS_PM,             PM, false,  true, false),
 		_B(                                PATCH, false,  true, false),
 		_A( GRAPHICS_BUNDLE_CB, BUFFER_BUNDLE_CB,  true, false, false),
 		_B(                             PAGEPOOL,  true, false, false),
 		_B(                         ATTRIBUTE_CB,  true, false, false),
 		_B(                        RTV_CB_GLOBAL,  true, false, false),
+		_A(   GRAPHICS_GFXP_POOL,        GFXP_POOL,  true, false, false),
+		_A( GRAPHICS_GFXP_CTRL_BLK,  GFXP_CTRL_BLK,  true,  true, false),
 		_B(                           FECS_EVENT,  true,  true, false),
 		_B(                      PRIV_ACCESS_MAP,  true,  true,  true),
 #undef _B
@@ -222,6 +225,13 @@ r535_gr_get_ctxbuf_info(struct r535_gr *gr, int i,
 	nvkm_debug(subdev, "%02x: size:0x%08x %s\n", i,
 		   size, (id < ARRAY_SIZE(map)) ? "*" : "");
 	if (id >= ARRAY_SIZE(map))
+		return;
+
+	/* Firmware reports no such buffer on this chip - nothing to promote
+	 * (matches physical RM: "Could not map %s Buffer as buffer is not
+	 * supported").
+	 */
+	if (size == 0)
 		return;
 
 	if (map[id].id1 == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_MAIN)
@@ -246,6 +256,11 @@ r535_gr_get_ctxbuf_info(struct r535_gr *gr, int i,
 	gr->ctxbuf[gr->ctxbuf_nr].global   = map[id].global;
 	gr->ctxbuf[gr->ctxbuf_nr].init     = map[id].init;
 	gr->ctxbuf[gr->ctxbuf_nr].ro       = map[id].ro;
+
+	nvkm_info(subdev, "ctxbuf[%d] id=%2u size=0x%08x page=%u align=%u %s%s%s\n",
+		  gr->ctxbuf_nr, map[id].id1, size, page, align,
+		  map[id].global ? "G" : "-", map[id].init ? "I" : "-",
+		  map[id].ro ? "RO" : "");
 	gr->ctxbuf_nr++;
 
 	if (map[id].id1 == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP) {

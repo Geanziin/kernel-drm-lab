@@ -6,7 +6,7 @@
 #include <core/object.h>
 #include <engine/gr.h>
 
-#define R515_GR_MAX_CTXBUFS 9
+#define R515_GR_MAX_CTXBUFS 13
 
 struct r535_gr_chan {
 	struct nvkm_object object;

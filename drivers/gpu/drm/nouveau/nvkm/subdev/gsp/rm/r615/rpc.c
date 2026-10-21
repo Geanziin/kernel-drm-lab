@@ -158,7 +158,7 @@ r615_rpc_receive(struct r615_rpc *rpc, struct r615_message *message, const char 
 					 R615_MESSAGE_MAX_BYTES, message);
 
 	if (ret && ret != -EAGAIN)
-		pr_err("nouveau r615: receive failed (%d) in %s, frame: %*ph\n",
+		pr_err("nvgd r615: receive failed (%d) in %s, frame: %*ph\n",
 		       ret, where, 96, rpc->frame);
 	return ret;
 }
@@ -362,7 +362,7 @@ r615_rpc_wait(struct r615_rpc *rpc, const struct r615_message *req,
 			    rep->sequence != req->sequence) {
 				ret = r615_rpc_unmatched(rpc, rep);
 				if (ret) {
-					pr_err("nouveau r615: unmatched type=%u function=%x seq=%llx while waiting for %x/%llx: %d\n",
+					pr_err("nvgd r615: unmatched type=%u function=%x seq=%llx while waiting for %x/%llx: %d\n",
 					       rep->type, rep->function, (unsigned long long)rep->sequence,
 					       expect_function, (unsigned long long)req->sequence, ret);
 					rpc->poisoned = true;
@@ -372,11 +372,11 @@ r615_rpc_wait(struct r615_rpc *rpc, const struct r615_message *req,
 			}
 			/* VGPU RPC v3 has no response bit; only GMCAPI encodes one. */
 			if (req->type == R615_MESSAGE_GMCAPI && !rep->response) {
-				pr_err("nouveau r615: reply %x without response flag\n", rep->function);
+				pr_err("nvgd r615: reply %x without response flag\n", rep->function);
 				return -EPROTO;
 			}
 			if (rep->status_or_limit) {
-				pr_err("nouveau r615: reply %x status %08x\n", rep->function, rep->status_or_limit);
+				pr_err("nvgd r615: reply %x status %08x\n", rep->function, rep->status_or_limit);
 				return -EIO;
 			}
 			return 0;
@@ -436,11 +436,11 @@ r615_rpc_gsp_init(struct r615_rpc *rpc, const u64 *sysinfo,
 	payload_bytes = rep.bytes;
 	/* Public kgspSendInitRpcs decodes responseSize / sizeof(NvU64) words. */
 	if (payload_bytes % sizeof(u64))
-		pr_warn("nouveau r615: GSP_INIT reply %u bytes, not word aligned; trailing bytes ignored\n",
+		pr_warn("nvgd r615: GSP_INIT reply %u bytes, not word aligned; trailing bytes ignored\n",
 			payload_bytes);
 	payload_bytes -= payload_bytes % sizeof(u64);
 	if (payload_bytes > static_limit * sizeof(u64)) {
-		pr_err("nouveau r615: GSP_INIT reply %u bytes exceeds limit %u\n",
+		pr_err("nvgd r615: GSP_INIT reply %u bytes exceeds limit %u\n",
 		       rep.bytes, static_limit * (u32)sizeof(u64));
 		ret = -EPROTO;
 	} else {
@@ -518,7 +518,7 @@ r615_rpc_transfer(struct r615_rpc *rpc, u32 function, const void *request, u32 r
 			return 0;
 		}
 		if (rep.bytes != R615_RPC_CHUNK_BYTES || target > reply_limit) {
-			pr_err("nouveau r615: RPC %x short continuation %u/%u\n", function, received, target);
+			pr_err("nvgd r615: RPC %x short continuation %u/%u\n", function, received, target);
 			rpc->poisoned = true;
 			return -EPROTO;
 		}
@@ -606,7 +606,7 @@ r615_rpc_api_push(struct nvkm_gsp *gsp, void *argv,
 		goto fail;
 	}
 	if (policy > NVKM_GSP_RPC_REPLY_POLL || repc > R615_RPC_MAX_BYTES) {
-		pr_err("nouveau r615: RPC %u rejected locally policy=%d repc=%u\n",
+		pr_err("nvgd r615: RPC %u rejected locally policy=%d repc=%u\n",
 		       call->function, policy, repc);
 		ret = -EINVAL;
 		goto fail;
