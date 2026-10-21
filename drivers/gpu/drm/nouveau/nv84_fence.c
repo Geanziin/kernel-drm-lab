@@ -212,8 +212,16 @@ nv84_fence_create(struct nouveau_drm *drm)
 
 	mutex_init(&priv->mutex);
 
-	/* Use VRAM if there is any ; otherwise fallback to system memory */
-	domain = drm->client.device.info.ram_size != 0 ?
+	/* Use VRAM if there is any ; otherwise fallback to system memory.
+	 *
+	 * nvgd: Volta+ keeps the fence page in coherent system memory.  Every
+	 * submission reads the sequence back (nouveau_fence_update() from
+	 * emit/done), and from VRAM each of those is an uncached BAR read that
+	 * costs ~1-2us on PCIe; the GPU side is a single posted semaphore
+	 * write followed by SYS_MEMBAR, so the move costs it nothing.
+	 */
+	domain = drm->client.device.info.ram_size != 0 &&
+		 drm->client.device.info.family < NV_DEVICE_INFO_V0_VOLTA ?
 		NOUVEAU_GEM_DOMAIN_VRAM :
 		 /*
 		  * fences created in sysmem must be non-cached or we
