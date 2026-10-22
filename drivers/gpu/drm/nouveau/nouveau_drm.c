@@ -31,6 +31,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/dynamic_debug.h>
 #include <linux/debugfs.h>
+#include <linux/version.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_drv.h>
@@ -1369,7 +1370,10 @@ static struct drm_driver
 driver_stub = {
 	.driver_features = DRIVER_GEM |
 			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE |
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
+			   /* GPUVA initialization is unconditional in DRM 7.3+. */
 			   DRIVER_GEM_GPUVA |
+#endif
 			   DRIVER_MODESET |
 			   DRIVER_RENDER,
 	.open = nouveau_drm_open,
