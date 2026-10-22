@@ -2,11 +2,24 @@
  *
  * Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
  */
+#include <linux/module.h>
 #include <nvif/chan.h>
 #include <nvif/user.h>
 
 #include <nvif/push906f.h>
 #include <nvhw/class/clc36f.h>
+
+/* nvgd: NVIDIA's own channel code (nvidia-uvm uvm_hal_turing_host_write_gpu_put)
+ * writes GP_PUT to a vidmem USERD, issues wmb() and rings the doorbell; the
+ * dummy BAR1 read is only needed when GP_PUT lives in sysmem, to push earlier
+ * BAR1 writes ahead of the GPU's GP_PUT fetch.  Here GPFIFO and pushbuffers
+ * are in coherent sysmem and USERD is in vidmem, so the uncached read-back
+ * was pure latency (~1 us over PCIe, before the doorbell, on every submit).
+ * nvgd.userd_flush=1 restores it.
+ */
+static bool nvif_chanc36f_userd_flush;
+module_param_named(userd_flush, nvif_chanc36f_userd_flush, bool, 0644);
+MODULE_PARM_DESC(userd_flush, "read USERD back before ringing the doorbell (default: n)");
 
 static void
 nvif_chanc36f_gpfifo_kick(struct nvif_chan *chan)
@@ -16,7 +29,8 @@ nvif_chanc36f_gpfifo_kick(struct nvif_chan *chan)
 	nvif_wr32(&chan->userd, 0x8c, chan->gpfifo.cur);
 
 	wmb(); /* ensure CPU writes are flushed to BAR1 */
-	nvif_rd32(&chan->userd, 0); /* ensure BAR1 writes are flushed to vidmem */
+	if (READ_ONCE(nvif_chanc36f_userd_flush))
+		nvif_rd32(&chan->userd, 0); /* ensure BAR1 writes are flushed to vidmem */
 
 	usermode->func->doorbell(usermode, chan->doorbell_token);
 }
